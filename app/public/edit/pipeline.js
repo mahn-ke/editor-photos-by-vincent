@@ -226,6 +226,7 @@ export function buildToneLut(adjust) {
         v = bp >= 0 ? Math.max(0, (v - bp) / (1 - bp)) : v * (1 + bp) - bp;
         // White point: positive brightens whites, negative dims them
         v = wp >= 0 ? v / (1 - wp) : v * (1 + wp);
+        v = Math.min(1, Math.max(0, v)); // the curves below are defined on 0..1
         // Brightness: midtone gamma with highlights protected
         v = Math.pow(Math.max(v, 0), gamma);
         // Contrast: S-curve around mid-grey that never clips

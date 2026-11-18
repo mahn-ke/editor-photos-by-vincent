@@ -660,14 +660,16 @@ function selectFilter(id) {
 function renderSuggestionsPanel() {
     const panel = $('panel-suggestions');
     const autos = state.stats ? autoRecipes(state.stats) : {};
-    const learned = state.suggestion ? [element('div', { class: 'suggestion-list' }, [element('button', {
-        type: 'button', class: 'suggestion-button',
+    const mine = [state.suggestion, ...(state.assetSuggestions ?? [])].filter(Boolean).filter((s, i, all) => all.findIndex(o => o.id === s.id) === i);
+    const learned = mine.length ? [element('div', { class: 'suggestion-list' }, mine.map(sug => element('button', {
+        type: 'button', class: 'suggestion-button', title: sug.why || '',
         onclick: () => {
-            state.recipe = normalizeRecipe(state.suggestion.recipe);
+            state.suggestion = sug;
+            state.recipe = normalizeRecipe(sug.recipe);
             filterThumbs = null;
             requestRender();
         },
-    }, [element('span', { class: 'suggestion-icon', 'aria-hidden': 'true', text: '★' }), element('span', { text: `${state.suggestion.name} (suggested for you)` })])]), element('p', { class: 'panel-note', text: state.suggestion.why || '' })] : [];
+    }, [element('span', { class: 'suggestion-icon', 'aria-hidden': 'true', text: '★' }), element('span', { text: sug.name })]))), element('p', { class: 'panel-note', text: mine[0].why ? `Why: ${mine[0].why}` : '' })] : [];
     panel.replaceChildren(
         ...(learned.length ? [element('h3', { class: 'section-title', text: 'Suggested for this photo' }), ...learned] : []),
         element('h3', { class: 'section-title', text: 'Suggestions' }),
@@ -949,6 +951,7 @@ async function start() {
             statusEl.textContent = 'Only photos can be edited.';
             return;
         }
+        state.assetSuggestions = (await api(`/api/suggestions?asset=${state.context.original.id}`).catch(() => ({ suggestions: [] }))).suggestions;
         const suggestionId = new URLSearchParams(location.search).get('suggestion');
         if (suggestionId) {
             // Start from the suggested edit; it counts as unsaved until you save it
@@ -961,7 +964,7 @@ async function start() {
         statusEl.hidden = true;
         const t = state.recipe.tools;
         if (t.sky.strength || t.colorFocus.strength || t.portraitLight.strength || t.blur.strength) await ensureMasks().catch(() => {});
-        selectTab(new URLSearchParams(location.search).get('tab') || 'adjust');
+        selectTab(new URLSearchParams(location.search).get('tab') || ((state.assetSuggestions?.length || state.suggestion) ? 'suggestions' : 'adjust'));
     } catch (error) {
         statusEl.textContent = `Couldn't open the photo: ${error.message}`;
     }

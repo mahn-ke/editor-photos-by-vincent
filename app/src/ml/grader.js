@@ -110,7 +110,7 @@ export function createGrader({ modelDir, log = console }) {
         const d = key => candidate[key] - original[key];
         const reasons = [];
         if (d('clipped') > 0.01) reasons.push('clips highlights or shadows');
-        if (!mono && d('natural') < -0.06) reasons.push('colours look unnatural');
+        if (!mono && d('natural') < -0.15) reasons.push('colours look unnatural');
         if (!mono && candidate.colourfulness > Math.max(original.colourfulness * 1.6, original.colourfulness + 0.12)) reasons.push('oversaturated');
         const aesthetic = d('aesthetic');
         const prompts = (d('quality') + d('beauty') + d('exposure')) / 3;

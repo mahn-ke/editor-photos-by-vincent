@@ -224,6 +224,7 @@ export function createApp({ config, store, immich, editor = null, background = n
 
     app.get('/api/suggestions', requireSession, (req, res) => {
         if (!suggester) return res.json({ suggestions: [] });
+        if (typeof req.query.asset === 'string' && UUID.test(req.query.asset)) return res.json({ suggestions: suggester.forAsset(req.session.userId, req.query.asset) });
         res.json(suggester.greeting(req.session.userId));
     });
 
@@ -255,6 +256,44 @@ export function createApp({ config, store, immich, editor = null, background = n
     app.post('/api/suggestions/:id/dismiss', requireSession, (req, res) => {
         if (!suggester?.dismiss(req.session.userId, req.params.id)) return res.status(404).json({ error: 'not_found' });
         res.json({ ok: true });
+    });
+
+    // Prepares suggestions for recent uploads right away, with the signed-in session
+    // (the background job does the same continuously once its API key exists)
+    const preparing = new Map();
+    app.post('/api/suggestions/prepare', requireSession, jsonBody, (req, res) => {
+        if (!suggester) return res.status(503).json({ error: 'unavailable' });
+        const userId = req.session.userId;
+        if (preparing.get(userId)?.running) return res.json(preparing.get(userId));
+        const days = Math.min(90, Math.max(1, Number(req.body?.days) || 28));
+        const ids = Array.isArray(req.body?.assetIds) ? req.body.assetIds.filter(id => UUID.test(id)).slice(0, 50) : null;
+        const token = req.session.token;
+        const state = { running: true, done: 0, total: 0, outcomes: {} };
+        preparing.set(userId, state);
+        (async () => {
+            try {
+                let targets = ids;
+                if (!targets) {
+                    const since = new Date(Date.now() - days * 24 * 3600e3).toISOString();
+                    const { items } = await immich.searchMetadata(token, { createdAfter: since, type: 'IMAGE', size: 60, page: 1 });
+                    targets = items.filter(a => !a.ownerId || a.ownerId === userId).map(a => a.id);
+                }
+                state.total = targets.length;
+                for (const id of targets) {
+                    try {
+                        const outcome = await suggester.process(userId, token, id);
+                        state.outcomes[outcome] = (state.outcomes[outcome] ?? 0) + 1;
+                    } catch (error) {
+                        state.outcomes.error = (state.outcomes.error ?? 0) + 1;
+                        log.warn(`Suggestions for ${id} failed: ${error.message}`);
+                    }
+                    state.done++;
+                }
+            } finally {
+                state.running = false;
+            }
+        })();
+        res.status(202).json(state);
     });
 
     app.post('/api/background/check', requireSession, (req, res) => {

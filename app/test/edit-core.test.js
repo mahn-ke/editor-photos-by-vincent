@@ -139,3 +139,20 @@ test('straightening a tilted line makes it level', () => {
     };
     assert.ok(Math.abs(rowOfLine(10) - rowOfLine(out.width - 10)) <= 1, `${rowOfLine(10)} vs ${rowOfLine(out.width - 10)}`);
 });
+
+test('no slider combination produces invalid pixels', () => {
+    const img = chart();
+    img.data.fill(0, 0, 3);
+    img.data.fill(1, 3, 6);
+    const values = { hdr: 1, brightness: 1, contrast: 1, whitePoint: 1, highlights: -1, shadows: 1, blackPoint: 1, saturation: 1, warmth: 1, tint: -1, skinTone: 1, blueTone: 1, pop: 1, vignette: 1 };
+    const keys = Object.keys(values);
+    for (let i = 0; i < keys.length; i++) {
+        for (let j = i; j < keys.length; j++) {
+            for (const sign of [1, -1]) {
+                const adjust = { [keys[i]]: values[keys[i]] * sign, [keys[j]]: values[keys[j]] };
+                const out = tone(img, adjust);
+                assert.ok(!out.data.some(Number.isNaN), JSON.stringify(adjust));
+            }
+        }
+    }
+});

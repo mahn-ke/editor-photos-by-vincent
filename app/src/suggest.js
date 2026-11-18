@@ -124,6 +124,10 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
             looks.push({ ...c, scores: s, verdict, gain: verdict.gain + personal });
         }
 
+        if (globalThis.process.env.SUGGEST_DEBUG) {
+            log.info?.(`Suggest ${assetId}: tilt ${JSON.stringify(tilt)} base aesthetic ${base.aesthetic.toFixed(2)} quality ${base.quality.toFixed(2)}`);
+            for (const l of looks) log.info?.(`  ${l.arm}: gain ${l.gain.toFixed(3)} aesthetic ${l.verdict.aesthetic} prompts ${l.verdict.prompts} ${l.verdict.reasons.join('; ')}`);
+        }
         // 2. Straighten, trusted from the horizon detector (CLIP can't judge levelness)
         const candidates = looks.filter(l => l.verdict.improved);
         const straightenOk = tilt.confidence >= 0.5 && Math.abs(tilt.angle) >= 0.4 && Math.abs(tilt.angle) <= STRAIGHTEN.maxAngle;
@@ -174,26 +178,27 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
 
     // ---- Greeting ----
 
+    // The smallest window with at least 4 photos to suggest for (else the widest that has any)
     function greeting(userId) {
         const t = now();
-        for (const [ms, label] of WINDOWS) {
-            const rows = q.ready.all(userId, t - ms);
+        const windows = WINDOWS.map(([ms, label]) => {
             const perAsset = new Map();
-            for (const row of rows) if (!perAsset.has(row.asset_id)) perAsset.set(row.asset_id, row);
-            if (perAsset.size) {
-                const items = [...perAsset.values()].slice(0, 5);
-                for (const row of items) q.shown.run(t, row.id);
-                return {
-                    window: label,
-                    text: `Based on your uploads in the last ${label}, here are some edits`,
-                    suggestions: items.map(row => ({
-                        id: row.id, assetId: row.asset_id, name: row.name, why: row.why,
-                        summary: describeRecipe(JSON.parse(row.recipe)), recipe: JSON.parse(row.recipe),
-                    })),
-                };
-            }
-        }
-        return { window: null, text: null, suggestions: [] };
+            for (const row of q.ready.all(userId, t - ms)) if (!perAsset.has(row.asset_id)) perAsset.set(row.asset_id, row);
+            return { perAsset, label };
+        });
+        const wanted = Math.min(4, windows.at(-1).perAsset.size);
+        const chosen = wanted ? windows.find(w => w.perAsset.size >= wanted) : null;
+        if (!chosen) return { window: null, text: null, suggestions: [] };
+        const items = [...chosen.perAsset.values()].slice(0, 5);
+        for (const row of items) q.shown.run(t, row.id);
+        return {
+            window: chosen.label,
+            text: `Based on your uploads in the last ${chosen.label}, here are some edits`,
+            suggestions: items.map(row => ({
+                id: row.id, assetId: row.asset_id, name: row.name, why: row.why,
+                summary: describeRecipe(JSON.parse(row.recipe)), recipe: JSON.parse(row.recipe),
+            })),
+        };
     }
 
     function preview(userId, id, which) {
@@ -266,5 +271,10 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
         }
     }
 
-    return { process, greeting, preview, get, dismiss, accepted, manualEdit, discardedVersion, expire, forget, setStatus: (id, s) => q.setStatus.run(s, id) };
+    function forAsset(userId, assetId) {
+        return q.forAsset.all(userId, assetId).filter(r => r.status === 'ready').sort((a, b) => a.rank - b.rank)
+            .map(row => ({ id: row.id, assetId: row.asset_id, name: row.name, why: row.why, recipe: JSON.parse(row.recipe), summary: describeRecipe(JSON.parse(row.recipe)) }));
+    }
+
+    return { process, greeting, preview, get, forAsset, dismiss, accepted, manualEdit, discardedVersion, expire, forget, setStatus: (id, s) => q.setStatus.run(s, id) };
 }
