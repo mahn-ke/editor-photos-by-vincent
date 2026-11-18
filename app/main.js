@@ -1,14 +1,24 @@
-import http from 'http';
+import path from 'node:path';
+import { loadConfig } from './src/config.js';
+import { createImmichClient } from './src/immich.js';
+import { createApp } from './src/server.js';
+import { openStore } from './src/sessions.js';
 
-const PORT = 3000;
+const config = loadConfig();
+const store = openStore(path.join(config.dataDir, 'sessions.sqlite'));
+const immich = createImmichClient({ baseUrl: config.immichUrl });
+const app = createApp({ config, store, immich });
 
-const server = http.createServer((req, res) => {
-    if (req.url === '/healthz') {
-        res.writeHead(200);
-        res.end('OK');
-    }
+store.prune();
+setInterval(() => store.prune(), 60 * 60 * 1000).unref();
+
+const server = app.listen(config.port, () => {
+    console.log(`editor-photos listening on :${config.port} for ${config.baseUrl}, Immich at ${config.immichUrl}`);
 });
 
-server.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
-});
+for (const signal of ['SIGTERM', 'SIGINT']) {
+    process.on(signal, () => server.close(() => {
+        store.close();
+        process.exit(0);
+    }));
+}
