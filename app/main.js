@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { createBackground, loadMasterKey } from './src/background.js';
 import { loadConfig } from './src/config.js';
 import { createEditor } from './src/edits.js';
 import { createImmichClient } from './src/immich.js';
@@ -11,7 +12,9 @@ const store = openStore(path.join(config.dataDir, 'sessions.sqlite'));
 const immich = createImmichClient({ baseUrl: config.immichUrl });
 const renderPool = createRenderPool();
 const editor = createEditor({ immich, renderPool });
-const app = createApp({ config, store, immich, editor });
+const background = createBackground({ db: store.db, immich, config, masterKey: loadMasterKey({ secret: config.appSecret, dataDir: config.dataDir }) });
+const app = createApp({ config, store, immich, editor, background });
+background.start();
 
 store.prune();
 setInterval(() => store.prune(), 60 * 60 * 1000).unref();

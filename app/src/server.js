@@ -39,7 +39,7 @@ function sameToken(a, b) {
     return left.length === right.length && timingSafeEqual(left, right);
 }
 
-export function createApp({ config, store, immich, editor = null, log = console }) {
+export function createApp({ config, store, immich, editor = null, background = null, log = console }) {
     const app = express();
     const secure = config.baseUrl.startsWith('https://');
     const sessionCookieOptions = { httpOnly: true, secure, sameSite: 'lax', path: '/' };
@@ -67,6 +67,13 @@ export function createApp({ config, store, immich, editor = null, log = console 
         // HTML and JSON are per user; media sets its own private caching
         if (!req.path.startsWith('/media/')) res.set('Cache-Control', 'private, no-store');
         next();
+    });
+
+    // Immich's workflow webhook (server-to-server, so no Origin header): only a per-user secret
+    app.post('/hooks/immich/:userId', express.json({ limit: '1mb' }), (req, res) => {
+        if (!background || !background.verifyWebhook(req.params.userId, req.get('x-editor-photos-secret'))) return res.status(403).json({ error: 'forbidden' });
+        background.onWebhook(req.params.userId, req.body);
+        res.status(202).json({ ok: true });
     });
 
     // State-changing requests must come from our own pages
@@ -152,6 +159,8 @@ export function createApp({ config, store, immich, editor = null, log = console 
                 userAgent: req.get('user-agent'),
             });
             const cookie = store.createSession({ token: result.accessToken, userId: result.userId, name: result.name });
+            // Set up (or check) the background API key without delaying the sign-in
+            background?.ensureUser(result.accessToken, result.userId).catch(error => log.warn(`Background setup failed: ${error.message}`));
             res.cookie(SESSION_COOKIE, cookie, { ...sessionCookieOptions, maxAge: SESSION_IDLE_MS });
             res.redirect(303, login.returnTo);
         } catch (callbackError) {
@@ -178,6 +187,21 @@ export function createApp({ config, store, immich, editor = null, log = console 
         endSession(req, res);
         res.redirect(303, '/signed-out');
     });
+
+    app.get('/api/background', requireSession, (req, res) => {
+        res.json(background ? background.status(req.session.userId) : { enabled: false });
+    });
+
+    app.post('/background/unstack-raw', requireSession, asUser(async (req, res) => {
+        const undone = background ? await background.unstackRawPairs(req.session.token, req.session.userId) : 0;
+        page(res, 200, messagePage({ title: 'RAW pairs unstacked', message: `${undone} RAW+JPEG stacks created by this app were removed. New pairs are no longer stacked until you turn background work on again.`, action: { href: '/', label: 'Back to photos' } }));
+        await background?.disableUser(req.session.token, req.session.userId);
+    }));
+
+    app.post('/background/stop', requireSession, asUser(async (req, res) => {
+        await background?.disableUser(req.session.token, req.session.userId);
+        page(res, 200, messagePage({ title: 'Background work stopped', message: 'The app deleted its Immich API key and upload webhook. Signing in again turns it back on.', action: { href: '/', label: 'Back to photos' } }));
+    }));
 
     app.get('/api/timeline/buckets', requireSession, asUser(async (req, res) => {
         res.json(await immich.buckets(req.session.token));

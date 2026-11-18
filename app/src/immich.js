@@ -41,7 +41,10 @@ export function trimBucket(raw) {
 }
 
 export function createImmichClient({ baseUrl, fetchImpl = fetch, timeoutMs = 20000 }) {
-    async function request(path, { method = 'GET', token, apiKey, body, rawBody, query, headers = {}, timeout = timeoutMs } = {}) {
+    // `token` is a session token string, or { apiKey } for background work
+    async function request(path, { method = 'GET', token: auth, body, rawBody, query, headers = {}, timeout = timeoutMs } = {}) {
+        const token = typeof auth === 'string' ? auth : null;
+        const apiKey = auth && typeof auth === 'object' ? auth.apiKey : null;
         const url = new URL(baseUrl + path);
         for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
         const response = await fetchImpl(url, {
@@ -212,6 +215,41 @@ export function createImmichClient({ baseUrl, fetchImpl = fetch, timeoutMs = 200
             const response = await request('/api/assets', { method: 'DELETE', token, body: { ids, force: false } });
             await response.body?.cancel();
             if (!response.ok) throw new ImmichError(`Immich delete answered ${response.status}`, response.status);
+        },
+
+        // ---- Search, API keys and workflows (background work) ----
+
+        // Flat metadata search with page-based paging; returns { items, nextPage }
+        async searchMetadata(auth, body) {
+            const result = await json('/api/search/metadata', { method: 'POST', token: auth, body });
+            return { items: result?.assets?.items ?? [], nextPage: result?.assets?.nextPage ?? null };
+        },
+
+        async me(auth) {
+            return json('/api/users/me', { token: auth });
+        },
+
+        async createApiKey(token, name, permissions) {
+            const created = await json('/api/api-keys', { method: 'POST', token, body: { name, permissions } });
+            return { id: created.id ?? created.apiKey?.id, secret: created.secret };
+        },
+
+        async deleteApiKey(token, id) {
+            const response = await request(`/api/api-keys/${encodeURIComponent(id)}`, { method: 'DELETE', token });
+            await response.body?.cancel();
+        },
+
+        async workflows(token) {
+            return json('/api/workflows', { token });
+        },
+
+        async createWorkflow(token, workflow) {
+            return json('/api/workflows', { method: 'POST', token, body: workflow });
+        },
+
+        async deleteWorkflow(token, id) {
+            const response = await request(`/api/workflows/${encodeURIComponent(id)}`, { method: 'DELETE', token });
+            await response.body?.cancel();
         },
 
         // Returns the raw response so the caller can stream it; follows Immich's

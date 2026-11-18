@@ -113,6 +113,8 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
     const stacks = new Map(); // stackId -> { id, primaryAssetId, assetIds }
     const uploads = new Map(); // assetId -> bytes
     const copies = [];
+    const apiKeys = new Map(); // id -> { id, secret, name, permissions }
+    const workflows = new Map();
     const stackOf = id => [...stacks.values()].find(s => s.assetIds.includes(id)) ?? null;
     const assetDto = (asset) => {
         const stack = stackOf(asset.id);
@@ -120,7 +122,7 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
             id: asset.id,
             type: asset.isImage ? 'IMAGE' : 'VIDEO',
             originalFileName: asset.originalFileName ?? `IMG_${asset.id.slice(0, 8)}.jpg`,
-            originalMimeType: 'image/jpeg',
+            originalMimeType: /\.dng$/i.test(asset.originalFileName ?? '') ? 'image/dng' : 'image/jpeg',
             width: Math.round(400 * asset.ratio),
             height: 400,
             fileCreatedAt: `${asset.fileCreatedAt}Z`,
@@ -147,7 +149,9 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
             res.end(JSON.stringify(payload));
         };
         const bearer = /^Bearer (.+)$/.exec(req.headers.authorization || '')?.[1];
-        const authed = Boolean(bearer && tokens.has(bearer));
+        const keyHeader = req.headers['x-api-key'];
+        const authedByKey = Boolean(keyHeader && [...apiKeys.values()].some(k => k.secret === keyHeader));
+        const authed = Boolean(bearer && tokens.has(bearer)) || authedByKey;
 
         if (req.method === 'POST' && url.pathname === '/api/oauth/authorize') {
             if (!body.redirectUri || !body.state || !body.codeChallenge) return send(400, { message: 'Validation failed' });
@@ -208,6 +212,37 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
         }
 
         let m;
+        if (req.method === 'POST' && url.pathname === '/api/api-keys') {
+            if (authedByKey) return send(403, { message: 'Session required' });
+            const key = { id: randomUUID(), secret: randomBytes(20).toString('base64url'), name: body.name, permissions: body.permissions };
+            apiKeys.set(key.id, key);
+            return send(201, { id: key.id, name: key.name, secret: key.secret, permissions: key.permissions });
+        }
+        if ((m = /^\/api\/api-keys\/([^/]+)$/.exec(url.pathname)) && req.method === 'DELETE') {
+            apiKeys.delete(m[1]);
+            return send(204, {});
+        }
+        if (req.method === 'GET' && url.pathname === '/api/users/me') {
+            return send(200, { id: FAKE_USER.id, name: FAKE_USER.name, email: FAKE_USER.email });
+        }
+        if (url.pathname === '/api/workflows' && req.method === 'POST') {
+            const workflow = { id: randomUUID(), ...body };
+            workflows.set(workflow.id, workflow);
+            return send(201, workflow);
+        }
+        if ((m = /^\/api\/workflows\/([^/]+)$/.exec(url.pathname)) && req.method === 'DELETE') {
+            workflows.delete(m[1]);
+            return send(204, {});
+        }
+        if (req.method === 'POST' && url.pathname === '/api/search/metadata') {
+            const all = [...assets.values()].filter(a => !a.isTrashed)
+                .filter(a => !body.originalFileName || (a.originalFileName ?? '').toLowerCase().includes(body.originalFileName.toLowerCase()))
+                .filter(a => !body.createdAfter || new Date(a.createdAt ?? `${a.fileCreatedAt}Z`) >= new Date(body.createdAfter));
+            const size = body.size ?? 250;
+            const page = body.page ?? 1;
+            const items = all.slice((page - 1) * size, page * size).map(a => ({ ...assetDto(a), ownerId: FAKE_USER.id, stack: undefined }));
+            return send(200, { assets: { items, nextPage: page * size < all.length ? String(page + 1) : null, count: items.length } });
+        }
         if (req.method === 'POST' && url.pathname === '/api/assets') {
             const file = body.assetData;
             if (!file || !body.filename || !body.fileCreatedAt) return send(400, { message: 'Validation failed' });
@@ -325,6 +360,8 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
         uploads,
         copies,
         stackOf,
+        apiKeys,
+        workflows,
         close: () => new Promise(resolve => server.close(resolve)),
     };
 }

@@ -46,6 +46,8 @@ export function appPage({ name }) {
         <button class="avatar" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="account-menu" title="${name}">${initials(name)}</button>
         <div class="menu" id="account-menu" hidden>
             <p class="menu-name">${name}</p>
+            <form method="post" action="/background/unstack-raw"><button type="submit" class="menu-secondary">Unstack RAW pairs</button></form>
+            <form method="post" action="/background/stop"><button type="submit" class="menu-secondary">Stop background work</button></form>
             <form method="post" action="/auth/logout"><button type="submit">Sign out</button></form>
         </div>
     </div>
