@@ -8,6 +8,7 @@ import { createLearner } from './src/learn.js';
 import { createGrader } from './src/ml/grader.js';
 import { createMasker } from './src/ml/masks.js';
 import { createMaskStore } from './src/mask-store.js';
+import { createRawService } from './src/raw-service.js';
 import { createApp } from './src/server.js';
 import { armPriors, createSuggester } from './src/suggest.js';
 import { openStore } from './src/sessions.js';
@@ -48,7 +49,8 @@ const background = createBackground({
         afterPoll: async () => suggester.expire(),
     },
 });
-const app = createApp({ config, store, immich, editor, background, suggester, maskStore });
+const rawService = createRawService({ immich, dataDir: config.dataDir });
+const app = createApp({ config, store, immich, editor, background, suggester, maskStore, rawService });
 background.start();
 
 store.prune();

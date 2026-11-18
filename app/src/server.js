@@ -39,7 +39,7 @@ function sameToken(a, b) {
     return left.length === right.length && timingSafeEqual(left, right);
 }
 
-export function createApp({ config, store, immich, editor = null, background = null, suggester = null, maskStore = null, log = console }) {
+export function createApp({ config, store, immich, editor = null, background = null, suggester = null, maskStore = null, rawService = null, log = console }) {
     const app = express();
     const secure = config.baseUrl.startsWith('https://');
     const sessionCookieOptions = { httpOnly: true, secure, sameSite: 'lax', path: '/' };
@@ -323,6 +323,25 @@ export function createApp({ config, store, immich, editor = null, background = n
         const originalId = await editor.resolveOriginal(req.session.token, id);
         await editor.show(req.session.token, originalId, editId);
         res.json({ ok: true });
+    }));
+
+    // RAW source: develops the paired DNG and fits the JPEG look on first use
+    app.get('/api/edit/:id/raw', requireSession, editorRoute(async (req, res) => {
+        const id = assetParam(req, res);
+        if (!id) return;
+        if (!rawService) return res.json({ available: false, reason: 'unavailable' });
+        const originalId = await editor.resolveOriginal(req.session.token, id);
+        const { baseline, ...info } = await rawService.info(req.session.token, originalId);
+        res.json({ ...info, baseline: info.available ? baseline : undefined });
+    }));
+
+    app.get('/api/edit/:id/raw/preview', requireSession, editorRoute(async (req, res) => {
+        const id = assetParam(req, res);
+        if (!id) return;
+        const originalId = await editor.resolveOriginal(req.session.token, id);
+        const bytes = rawService?.previewBinary(originalId);
+        if (!bytes) return res.status(404).json({ error: 'not_found' });
+        res.set('Cache-Control', 'private, max-age=3600').type('application/octet-stream').send(bytes);
     }));
 
     // Tools masks: computed on first use (the Tools tab), then cached
