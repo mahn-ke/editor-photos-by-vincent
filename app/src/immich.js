@@ -41,21 +41,26 @@ export function trimBucket(raw) {
 }
 
 export function createImmichClient({ baseUrl, fetchImpl = fetch, timeoutMs = 20000 }) {
-    async function request(path, { method = 'GET', token, body, query, headers = {} } = {}) {
+    async function request(path, { method = 'GET', token, apiKey, body, rawBody, query, headers = {}, timeout = timeoutMs } = {}) {
         const url = new URL(baseUrl + path);
         for (const [key, value] of Object.entries(query ?? {})) url.searchParams.set(key, value);
         const response = await fetchImpl(url, {
             method,
             redirect: 'follow',
-            signal: AbortSignal.timeout(timeoutMs),
+            signal: AbortSignal.timeout(rawBody ? Math.max(timeout, 300000) : timeout),
             headers: {
                 accept: 'application/json',
                 ...(token ? { authorization: `Bearer ${token}` } : {}),
+                ...(apiKey ? { 'x-api-key': apiKey } : {}),
                 ...(body ? { 'content-type': 'application/json' } : {}),
                 ...Object.fromEntries(Object.entries(headers).filter(([, value]) => value)),
             },
-            body: body ? JSON.stringify(body) : undefined,
+            body: rawBody ?? (body ? JSON.stringify(body) : undefined),
         });
+        if (response.status === 401 && apiKey) {
+            await response.body?.cancel();
+            throw new ImmichUnauthorized('The background API key is no longer valid');
+        }
         if (response.status === 401 && token) {
             await response.body?.cancel();
             throw new ImmichUnauthorized();
@@ -114,6 +119,99 @@ export function createImmichClient({ baseUrl, fetchImpl = fetch, timeoutMs = 200
                 query: { ...TIMELINE_FILTERS, timeBucket: `${month}-01T00:00:00.000Z` },
             });
             return trimBucket(raw);
+        },
+
+        // ---- Assets, versions and metadata (used by the editor) ----
+
+        // Asset details without people/face data, which this app never needs
+        async asset(token, id) {
+            const asset = await json(`/api/assets/${encodeURIComponent(id)}`, { token });
+            delete asset.people;
+            delete asset.unassignedFaces;
+            return asset;
+        },
+
+        async metadata(token, id) {
+            const items = await json(`/api/assets/${encodeURIComponent(id)}/metadata`, { token });
+            return Object.fromEntries((Array.isArray(items) ? items : []).map(item => [item.key, item.value]));
+        },
+
+        async setMetadata(token, id, key, value) {
+            await json(`/api/assets/${encodeURIComponent(id)}/metadata`, { method: 'PUT', token, body: { items: [{ key, value }] } });
+        },
+
+        async deleteMetadata(token, id, key) {
+            const response = await request(`/api/assets/${encodeURIComponent(id)}/metadata/${encodeURIComponent(key)}`, { method: 'DELETE', token });
+            await response.body?.cancel();
+            if (!response.ok && response.status !== 400 && response.status !== 404) throw new ImmichError(`Immich DELETE metadata answered ${response.status}`, response.status);
+        },
+
+        async stack(token, id) {
+            return json(`/api/stacks/${encodeURIComponent(id)}`, { token });
+        },
+
+        // The first asset becomes the primary; an existing stack whose primary is listed merges in
+        async createStack(token, assetIds) {
+            return json('/api/stacks', { method: 'POST', token, body: { assetIds } });
+        },
+
+        async setStackPrimary(token, stackId, primaryAssetId) {
+            return json(`/api/stacks/${encodeURIComponent(stackId)}`, { method: 'PUT', token, body: { primaryAssetId } });
+        },
+
+        async deleteStack(token, stackId) {
+            const response = await request(`/api/stacks/${encodeURIComponent(stackId)}`, { method: 'DELETE', token });
+            await response.body?.cancel();
+            if (!response.ok && response.status !== 404) throw new ImmichError(`Immich DELETE stack answered ${response.status}`, response.status);
+        },
+
+        async removeFromStack(token, stackId, assetId) {
+            const response = await request(`/api/stacks/${encodeURIComponent(stackId)}/assets/${encodeURIComponent(assetId)}`, { method: 'DELETE', token });
+            await response.body?.cancel();
+            if (!response.ok && response.status !== 404) throw new ImmichError(`Immich remove from stack answered ${response.status}`, response.status);
+        },
+
+        // Raw response of the original file (JPEG, HEIC, DNG, …)
+        async original(token, id) {
+            const response = await request(`/api/assets/${encodeURIComponent(id)}/original`, { token, headers: { accept: '*/*' } });
+            if (!response.ok) {
+                await response.body?.cancel();
+                throw new ImmichError(`Immich original answered ${response.status}`, response.status);
+            }
+            return response;
+        },
+
+        async upload(token, { bytes, filename, fileCreatedAt, fileModifiedAt, metadata, contentType = 'image/jpeg' }) {
+            const form = new FormData();
+            // filename must precede the file part so Immich checks the right extension
+            form.append('filename', filename);
+            form.append('fileCreatedAt', fileCreatedAt);
+            form.append('fileModifiedAt', fileModifiedAt);
+            if (metadata) form.append('metadata', JSON.stringify(metadata));
+            form.append('assetData', new Blob([bytes], { type: contentType }), filename);
+            const response = await request('/api/assets', { method: 'POST', token, rawBody: form });
+            if (!response.ok) {
+                await response.body?.cancel();
+                throw new ImmichError(`Immich upload answered ${response.status}`, response.status);
+            }
+            return response.json();
+        },
+
+        async updateAsset(token, id, fields) {
+            return json(`/api/assets/${encodeURIComponent(id)}`, { method: 'PUT', token, body: fields });
+        },
+
+        async copyAsset(token, body) {
+            const response = await request('/api/assets/copy', { method: 'PUT', token, body });
+            await response.body?.cancel();
+            if (!response.ok) throw new ImmichError(`Immich copy answered ${response.status}`, response.status);
+        },
+
+        // Moves assets to Immich's trash (recoverable); never force-deletes
+        async trash(token, ids) {
+            const response = await request('/api/assets', { method: 'DELETE', token, body: { ids, force: false } });
+            await response.body?.cancel();
+            if (!response.ok) throw new ImmichError(`Immich delete answered ${response.status}`, response.status);
         },
 
         // Returns the raw response so the caller can stream it; follows Immich's

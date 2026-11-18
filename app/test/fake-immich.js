@@ -2,7 +2,7 @@
 // Its authorize URL points straight back at the redirect URI, as if the identity
 // provider had signed the user in without a prompt. Used by the tests and `npm run dev:fake`.
 import http from 'node:http';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 export const FAKE_USER = { id: '6b1c7a52-3f0e-4c2a-9d51-2f6e8a0c4b17', name: 'Test User', email: 'test.user@example.com' };
 const ISSUER = 'https://sso.example.test/realms/test';
@@ -89,10 +89,18 @@ function placeholderSvg(asset, size) {
         + `<text x="50%" y="50%" fill="#fff" font-family="sans-serif" font-size="${height / 12}" text-anchor="middle" dominant-baseline="middle">${label}${asset.isImage ? '' : ' ▶'}</text></svg>`;
 }
 
-async function readJson(req) {
+async function readBody(req) {
     const chunks = [];
     for await (const chunk of req) chunks.push(chunk);
-    const text = Buffer.concat(chunks).toString('utf8');
+    const raw = Buffer.concat(chunks);
+    const type = req.headers['content-type'] || '';
+    if (type.startsWith('multipart/form-data')) {
+        const form = await new Request('http://fake/upload', { method: 'POST', headers: { 'content-type': type }, body: raw }).formData();
+        const fields = {};
+        for (const [key, value] of form) fields[key] = typeof value === 'string' ? value : { name: value.name, bytes: Buffer.from(await value.arrayBuffer()) };
+        return fields;
+    }
+    const text = raw.toString('utf8');
     return text ? JSON.parse(text) : {};
 }
 
@@ -101,12 +109,40 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
     const tokens = new Set();
     const requests = [];
     const assets = new Map(library.flatMap(month => month.assets.map(asset => [asset.id, asset])));
+    const metadata = new Map(); // assetId -> Map(key -> value)
+    const stacks = new Map(); // stackId -> { id, primaryAssetId, assetIds }
+    const uploads = new Map(); // assetId -> bytes
+    const copies = [];
+    const stackOf = id => [...stacks.values()].find(s => s.assetIds.includes(id)) ?? null;
+    const assetDto = (asset) => {
+        const stack = stackOf(asset.id);
+        return {
+            id: asset.id,
+            type: asset.isImage ? 'IMAGE' : 'VIDEO',
+            originalFileName: asset.originalFileName ?? `IMG_${asset.id.slice(0, 8)}.jpg`,
+            originalMimeType: 'image/jpeg',
+            width: Math.round(400 * asset.ratio),
+            height: 400,
+            fileCreatedAt: `${asset.fileCreatedAt}Z`,
+            fileModifiedAt: `${asset.fileCreatedAt}Z`,
+            localDateTime: new Date(new Date(`${asset.fileCreatedAt}Z`).getTime() + 3600000).toISOString(),
+            isTrashed: Boolean(asset.isTrashed),
+            exifInfo: { make: 'Fake', model: 'Camera', latitude: 53.55, longitude: 9.99 },
+            people: [{ id: 'p1', name: 'Should never leave the server' }],
+            stack: stack ? { id: stack.id, primaryAssetId: stack.primaryAssetId, assetCount: stack.assetIds.filter(id => !assets.get(id)?.isTrashed).length } : null,
+            ...(asset.dateTimeOriginal ? { dateTimeOriginal: asset.dateTimeOriginal } : {}),
+        };
+    };
 
     const server = http.createServer(async (req, res) => {
         const url = new URL(req.url, 'http://fake-immich');
-        const body = req.method === 'POST' ? await readJson(req) : null;
+        const body = req.method === 'GET' ? null : await readBody(req);
         requests.push({ method: req.method, path: url.pathname, query: Object.fromEntries(url.searchParams), headers: req.headers, body });
         const send = (status, payload) => {
+            if (status === 204) {
+                res.writeHead(204);
+                return res.end();
+            }
             res.writeHead(status, { 'content-type': 'application/json' });
             res.end(JSON.stringify(payload));
         };
@@ -171,6 +207,88 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
             return send(200, columns(month ? month.assets : []));
         }
 
+        let m;
+        if (req.method === 'POST' && url.pathname === '/api/assets') {
+            const file = body.assetData;
+            if (!file || !body.filename || !body.fileCreatedAt) return send(400, { message: 'Validation failed' });
+            const id = randomUUID();
+            assets.set(id, { id, ratio: 1.5, isImage: true, fileCreatedAt: body.fileCreatedAt.replace(/Z$/, ''), localOffsetHours: 0, duration: null, stack: null, originalFileName: body.filename });
+            uploads.set(id, file.bytes);
+            if (body.metadata) metadata.set(id, new Map(JSON.parse(body.metadata).map(item => [item.key, item.value])));
+            return send(201, { id, status: 'created' });
+        }
+        if (req.method === 'PUT' && url.pathname === '/api/assets/copy') {
+            copies.push(body);
+            return send(204, {});
+        }
+        if (req.method === 'DELETE' && url.pathname === '/api/assets') {
+            for (const id of body.ids || []) if (assets.has(id)) assets.get(id).isTrashed = true;
+            return send(204, {});
+        }
+        if ((m = /^\/api\/assets\/([^/]+)\/metadata$/.exec(url.pathname))) {
+            if (!assets.has(m[1])) return send(404, { message: 'Not found' });
+            const map = metadata.get(m[1]) ?? new Map();
+            if (req.method === 'PUT') {
+                for (const item of body.items) map.set(item.key, item.value);
+                metadata.set(m[1], map);
+            }
+            return send(200, [...map].map(([key, value]) => ({ key, value, updatedAt: new Date().toISOString() })));
+        }
+        if ((m = /^\/api\/assets\/([^/]+)\/metadata\/([^/]+)$/.exec(url.pathname)) && req.method === 'DELETE') {
+            metadata.get(m[1])?.delete(decodeURIComponent(m[2]));
+            return send(204, {});
+        }
+        if ((m = /^\/api\/assets\/([^/]+)\/original$/.exec(url.pathname))) {
+            const asset = assets.get(m[1]);
+            if (!asset) return send(404, { message: 'Not found' });
+            const bytes = uploads.get(asset.id) ?? Buffer.from(placeholderSvg({ ...asset, fileCreatedAt: asset.fileCreatedAt }, 'thumbnail'));
+            res.writeHead(200, { 'content-type': uploads.has(asset.id) ? 'image/jpeg' : 'image/svg+xml' });
+            return res.end(bytes);
+        }
+        if ((m = /^\/api\/assets\/([0-9a-f-]{36})$/.exec(url.pathname))) {
+            const asset = assets.get(m[1]);
+            if (!asset) return send(404, { message: 'Not found' });
+            if (req.method === 'PUT') Object.assign(asset, body);
+            return send(200, assetDto(asset));
+        }
+        if (req.method === 'POST' && url.pathname === '/api/stacks') {
+            const ids = body.assetIds;
+            const merged = [];
+            for (const id of ids) {
+                const existing = stackOf(id);
+                if (existing && existing.primaryAssetId === id) {
+                    merged.push(...existing.assetIds);
+                    stacks.delete(existing.id);
+                } else if (existing) {
+                    existing.assetIds = existing.assetIds.filter(a => a !== id);
+                }
+                merged.push(id);
+            }
+            const stack = { id: randomUUID(), primaryAssetId: ids[0], assetIds: [...new Set(merged)] };
+            stacks.set(stack.id, stack);
+            return send(201, { id: stack.id, primaryAssetId: stack.primaryAssetId });
+        }
+        if ((m = /^\/api\/stacks\/([^/]+)\/assets\/([^/]+)$/.exec(url.pathname)) && req.method === 'DELETE') {
+            const stack = stacks.get(m[1]);
+            if (!stack) return send(404, { message: 'Not found' });
+            if (stack.primaryAssetId === m[2]) return send(400, { message: "Cannot remove stack's primary asset" });
+            stack.assetIds = stack.assetIds.filter(id => id !== m[2]);
+            return send(204, {});
+        }
+        if ((m = /^\/api\/stacks\/([^/]+)$/.exec(url.pathname))) {
+            const stack = stacks.get(m[1]);
+            if (!stack) return send(404, { message: 'Not found' });
+            if (req.method === 'DELETE') {
+                stacks.delete(stack.id);
+                return send(204, {});
+            }
+            if (req.method === 'PUT') {
+                if (!stack.assetIds.includes(body.primaryAssetId)) return send(400, { message: 'Not in stack' });
+                stack.primaryAssetId = body.primaryAssetId;
+            }
+            return send(200, { id: stack.id, primaryAssetId: stack.primaryAssetId, assets: stack.assetIds.map(id => assetDto(assets.get(id))) });
+        }
+
         const media = /^\/api\/assets\/([^/]+)\/thumbnail$/.exec(url.pathname);
         if (req.method === 'GET' && media) {
             const asset = assets.get(media[1]);
@@ -201,6 +319,12 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
         requests,
         tokens,
         revokeAll: () => tokens.clear(),
+        assets,
+        metadata,
+        stacks,
+        uploads,
+        copies,
+        stackOf,
         close: () => new Promise(resolve => server.close(resolve)),
     };
 }

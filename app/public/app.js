@@ -218,6 +218,7 @@ const viewer = {
     prev: document.getElementById('viewer-prev'),
     next: document.getElementById('viewer-next'),
     close: document.getElementById('viewer-close'),
+    edit: document.getElementById('viewer-edit'),
     current: null,
     request: 0,
 };
@@ -252,6 +253,8 @@ function show(position) {
     full.src = `/media/${id}/preview`;
 
     viewer.caption.textContent = formatDateTime(time);
+    viewer.edit.href = `/edit/${id}`;
+    viewer.edit.hidden = !data.isImage[position.index];
     viewer.play.hidden = data.isImage[position.index];
     viewer.prev.disabled = isFirst(position);
     viewer.next.disabled = isLast(position);

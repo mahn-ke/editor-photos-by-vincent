@@ -1,0 +1,15 @@
+// Runs the shared pixel pipeline off the main thread
+import { parentPort } from 'node:worker_threads';
+import { fromRGB, render, toRGB8 } from '../public/edit/pipeline.js';
+
+parentPort.on('message', ({ id, width, height, depth, buffer, recipe, maxPixels }) => {
+    try {
+        const pixels = depth === 16 ? new Uint16Array(buffer) : new Uint8Array(buffer);
+        const src = fromRGB(pixels, width, height, depth === 16 ? 65535 : 255);
+        const out = render(src, recipe, { maxPixels: maxPixels ?? Infinity });
+        const rgb = toRGB8(out);
+        parentPort.postMessage({ id, ok: true, width: out.width, height: out.height, buffer: rgb.buffer }, [rgb.buffer]);
+    } catch (error) {
+        parentPort.postMessage({ id, ok: false, error: error.message });
+    }
+});

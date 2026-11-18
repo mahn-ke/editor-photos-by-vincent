@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import express from 'express';
 import { ImmichUnauthorized, MEDIA_SIZES } from './immich.js';
 import { SESSION_IDLE_MS } from './sessions.js';
-import { appPage, messagePage } from './views.js';
+import { appPage, editorPage, messagePage } from './views.js';
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
 const SESSION_COOKIE = 'ep_session';
@@ -39,7 +39,7 @@ function sameToken(a, b) {
     return left.length === right.length && timingSafeEqual(left, right);
 }
 
-export function createApp({ config, store, immich, log = console }) {
+export function createApp({ config, store, immich, editor = null, log = console }) {
     const app = express();
     const secure = config.baseUrl.startsWith('https://');
     const sessionCookieOptions = { httpOnly: true, secure, sameSite: 'lax', path: '/' };
@@ -187,6 +187,68 @@ export function createApp({ config, store, immich, log = console }) {
         const { month } = req.query;
         if (typeof month !== 'string' || !MONTH.test(month)) return res.status(400).json({ error: 'invalid_month' });
         res.json(await immich.bucket(req.session.token, month));
+    }));
+
+    // ---- Editor ----
+
+    app.get('/edit/:id', (req, res) => {
+        if (!UUID.test(req.params.id)) return page(res, 404, messagePage({ title: 'Not found', message: 'This photo does not exist.', action: { href: '/', label: 'Back to photos' } }));
+        if (!req.session) return res.redirect(302, `/auth/login?return=${encodeURIComponent(`/edit/${req.params.id}`)}`);
+        page(res, 200, editorPage({ assetId: req.params.id, name: req.session.name }));
+    });
+
+    const jsonBody = express.json({ limit: '256kb' });
+    const editorRoute = handler => asUser(async (req, res) => {
+        if (!editor) return res.status(503).json({ error: 'editor_unavailable' });
+        try {
+            await handler(req, res);
+        } catch (error) {
+            if (error.status && error.status < 500) return res.status(error.status).json({ error: error.message });
+            throw error;
+        }
+    });
+    const assetParam = (req, res) => {
+        if (UUID.test(req.params.id)) return req.params.id;
+        res.status(400).json({ error: 'invalid_asset' });
+        return null;
+    };
+
+    app.get('/api/edit/:id', requireSession, editorRoute(async (req, res) => {
+        const id = assetParam(req, res);
+        if (id) res.json(await editor.context(req.session.token, id));
+    }));
+
+    app.post('/api/edit/:id/save', requireSession, jsonBody, editorRoute(async (req, res) => {
+        const id = assetParam(req, res);
+        if (!id) return;
+        const originalId = await editor.resolveOriginal(req.session.token, id);
+        const job = editor.startSave({ token: req.session.token, userId: req.session.userId, originalId, recipe: req.body?.recipe, source: req.body?.source });
+        res.status(202).json({ jobId: job.id });
+    }));
+
+    app.get('/api/jobs/:id', requireSession, (req, res) => {
+        const job = editor?.job(req.params.id, req.session.userId);
+        if (!job) return res.status(404).json({ error: 'not_found' });
+        res.json(job);
+    });
+
+    app.post('/api/edit/:id/discard', requireSession, jsonBody, editorRoute(async (req, res) => {
+        const id = assetParam(req, res);
+        if (!id) return;
+        const editId = req.body?.all === true ? 'all' : req.body?.editId;
+        if (typeof editId !== 'string') return res.status(400).json({ error: 'invalid_edit' });
+        const originalId = await editor.resolveOriginal(req.session.token, id);
+        res.json(await editor.discard(req.session.token, originalId, editId));
+    }));
+
+    app.post('/api/edit/:id/show', requireSession, jsonBody, editorRoute(async (req, res) => {
+        const id = assetParam(req, res);
+        if (!id) return;
+        const editId = req.body?.editId ?? null;
+        if (editId !== null && typeof editId !== 'string') return res.status(400).json({ error: 'invalid_edit' });
+        const originalId = await editor.resolveOriginal(req.session.token, id);
+        await editor.show(req.session.token, originalId, editId);
+        res.json({ ok: true });
     }));
 
     app.get('/media/:id/:size', requireSession, asUser(async (req, res) => {

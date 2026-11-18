@@ -140,3 +140,5 @@ vite.config.js.timestamp-*
 # App
 data/
 test/.tmp/
+e2e/.tmp/
+e2e/report/
