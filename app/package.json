@@ -1,0 +1,6 @@
+{
+    "name": "editor-photos-by-vincent",
+    "scripts": {
+        "start": "node main.js"
+    }
+}
