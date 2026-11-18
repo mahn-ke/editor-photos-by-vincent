@@ -16,6 +16,30 @@ export const MODELS = {
         size: 89117001,
         licence: 'MIT (OpenAI CLIP, Xenova ONNX export)',
     },
+    depth: {
+        url: `${HF}/onnx-community/depth-anything-v2-small/resolve/4472b7362082ad9968fee890ca0f1e5aca36b93d/onnx/model_int8.onnx`,
+        sha256: '01aa7a23de3f4a0ee1a2bb9997e6918104c85a9f95dea46d27b9b3fb0c6b9001',
+        size: 27258801,
+        licence: 'Apache-2.0 (Depth Anything V2 Small)',
+    },
+    matte: {
+        url: `${HF}/Xenova/modnet/resolve/fa2fa546052fba4c08921230a26cc69a333fca12/onnx/model_quantized.onnx`,
+        sha256: '92e49898c3e05a6d7a944fc67a8cb87c4aad754ffb6ebd949528c7d1105fee3a',
+        size: 6632188,
+        licence: 'Apache-2.0 (MODNet)',
+    },
+    sky: {
+        url: `${HF}/JianyuanWang/skyseg/resolve/3ba8c6df1d9ba9ff26f637c7ba9568ac11a9aa7f/skyseg.onnx`,
+        sha256: 'ab9c34c64c3d821220a2886a4a06da4642ffa14d5b30e8d5339056a089aa1d39',
+        size: 175997079,
+        licence: 'MIT (U²-Net sky segmentation)',
+    },
+    face: {
+        url: 'https://github.com/opencv/opencv_zoo/raw/f12e12798e8314f7c074a6656816c048dcc95b7a/models/face_detection_yunet/face_detection_yunet_2023mar.onnx',
+        sha256: '8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4',
+        size: 232589,
+        licence: 'MIT (YuNet, OpenCV Zoo); used only to locate faces for Portrait light',
+    },
 };
 
 async function sha256(file) {

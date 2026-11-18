@@ -433,9 +433,61 @@ function bandWeight(hue, centre, halfWidth) {
     return d >= halfWidth ? 0 : 0.5 + 0.5 * Math.cos((Math.PI * d) / halfWidth);
 }
 
+// Resamples masks (upright source orientation, any resolution) into the output's
+// geometry, and maps face boxes the same way
+export function transformMasks(masks, geometry, W0, H0, outW, outH) {
+    if (!masks) return null;
+    const map = outputMapping(geometry, W0, H0, outW, outH);
+    const p = [0, 0];
+    const out = { width: outW, height: outH };
+    for (const key of ['sky', 'subject', 'depth']) {
+        const src = masks[key];
+        if (!src) continue;
+        const mw = masks.width;
+        const mh = masks.height;
+        const dst = new Float32Array(outW * outH);
+        for (let v = 0; v < outH; v++) {
+            for (let u = 0; u < outW; u++) {
+                map(u, v, p);
+                const x = Math.min(mw - 1, Math.max(0, (p[0] / W0) * mw - 0.5));
+                const y = Math.min(mh - 1, Math.max(0, (p[1] / H0) * mh - 0.5));
+                const x0 = Math.floor(x), y0 = Math.floor(y);
+                const x1 = Math.min(mw - 1, x0 + 1), y1 = Math.min(mh - 1, y0 + 1);
+                const ax = x - x0, ay = y - y0;
+                const top = src[y0 * mw + x0] + (src[y0 * mw + x1] - src[y0 * mw + x0]) * ax;
+                const bottom = src[y1 * mw + x0] + (src[y1 * mw + x1] - src[y1 * mw + x0]) * ax;
+                dst[v * outW + u] = top + (bottom - top) * ay;
+            }
+        }
+        out[key] = dst;
+    }
+    if (masks.faces?.length) {
+        // The mapping is affine: invert it from three points to move face boxes forward
+        const o = map(0, 0, [0, 0]);
+        const ex = map(1, 0, [0, 0]);
+        const ey = map(0, 1, [0, 0]);
+        const a = ex[0] - o[0], b = ey[0] - o[0], c = ex[1] - o[1], d = ey[1] - o[1];
+        const det = a * d - b * c || 1;
+        const forward = (x, y) => {
+            const dx = x - o[0], dy = y - o[1];
+            return [(d * dx - b * dy) / det, (-c * dx + a * dy) / det];
+        };
+        const scale = Math.sqrt(Math.abs(det)) || 1;
+        out.faces = masks.faces.map((f) => {
+            const [cx, cy] = forward((f.x + f.w / 2) * W0, (f.y + f.h / 2) * H0);
+            const size = Math.max(f.w * W0, f.h * H0) / scale;
+            return { x: cx / outW - size / 2 / outW, y: cy / outH - size / 2 / outH, w: size / outW, h: size / outH, score: f.score };
+        }).filter(f => f.x + f.w > 0 && f.y + f.h > 0 && f.x < 1 && f.y < 1);
+    }
+    return out;
+}
+
 // Full render: geometry first (so tone work only touches kept pixels), then tone
 export function render(src, recipe, { maxPixels = Infinity, sourceSize = null, masks = null, tools = null } = {}) {
     const r = normalizeRecipe(recipe);
     const geometric = applyGeometry(src, r.geometry, sourceSize, maxPixels);
-    return applyTone(geometric, r, { masks, tools });
+    const W0 = sourceSize?.width ?? src.width;
+    const H0 = sourceSize?.height ?? src.height;
+    const moved = masks && tools ? transformMasks(masks, r.geometry, W0, H0, geometric.width, geometric.height) : null;
+    return applyTone(geometric, r, { masks: moved, tools });
 }

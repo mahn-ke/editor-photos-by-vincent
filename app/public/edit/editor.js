@@ -2,6 +2,7 @@ import { ADJUST_KEYS, ADJUST_LABELS, ASPECTS, MAX_ANGLE, UNIPOLAR, defaultRecipe
 import { aspectValue, constrainRect, cropToPixels, defaultRect, fitsInside, maxRectAt, orientedSize, pixelsToCrop } from './geometry.js';
 import { FILTERS } from './filters.js';
 import { autoRecipes } from './auto.js';
+import { SKY_LOOKS } from './tools.js';
 
 const $ = id => document.getElementById(id);
 const assetId = $('editor').dataset.asset;
@@ -684,9 +685,104 @@ function applyAuto(auto) {
     requestRender();
 }
 
-function renderToolsPanel() {
-    $('panel-tools').replaceChildren(element('p', { class: 'panel-note', text: 'Sky, Color focus, Portrait light and Blur arrive in the next step.' }));
+// Masks are analysed on the server the first time Tools are needed for a photo
+async function ensureMasks() {
+    if (state.masks) return state.masks;
+    state.masks = (async () => {
+        const id = state.context.original.id;
+        const info = await api(`/api/assets/${id}/masks`);
+        await call('masks', { info, base: `/api/assets/${id}/masks` });
+        return info;
+    })();
+    try {
+        return await state.masks;
+    } catch (error) {
+        state.masks = null;
+        throw error;
+    }
 }
+
+function toolSlider(label, value, onChange) {
+    const input = element('input', { type: 'range', min: '0', max: '1', step: '0.01', value: String(value), 'aria-label': label, class: 'unipolar' });
+    const output = element('output', { class: 'slider-value', text: formatValue(value) });
+    const row = element('div', { class: `slider-row${value ? ' active' : ''}` }, [element('label', { class: 'slider-label', text: label }), output, input]);
+    paintRange(input);
+    input.addEventListener('input', () => {
+        const v = Number(input.value);
+        output.textContent = formatValue(v);
+        row.classList.toggle('active', v !== 0);
+        paintRange(input);
+        onChange(v);
+    });
+    input.addEventListener('dblclick', () => { input.value = '0'; input.dispatchEvent(new Event('input')); });
+    return row;
+}
+
+async function renderToolsPanel() {
+    const panel = $('panel-tools');
+    panel.replaceChildren(element('p', { class: 'panel-note', text: 'Analysing the photo for sky, subject, depth and faces…' }));
+    let info;
+    try {
+        info = await ensureMasks();
+    } catch (error) {
+        panel.replaceChildren(element('p', { class: 'panel-note', text: `Tools aren't available: ${error.message}` }));
+        return;
+    }
+    if (state.tab !== 'tools') return;
+    const t = state.recipe.tools;
+    const sections = [];
+    const unavailable = [];
+    if ((info.coverage?.sky ?? 0) > 0.03) {
+        sections.push(element('h3', { class: 'section-title', text: 'Sky' }), element('div', { class: 'palette-row' }, Object.keys(SKY_LOOKS).map(p => element('button', {
+            type: 'button', class: `palette-chip${t.sky.palette === p ? ' selected' : ''}`, 'aria-pressed': String(t.sky.palette === p),
+            onclick: () => { t.sky.palette = p; if (!t.sky.strength) t.sky.strength = 0.7; renderToolsPanel(); requestRender(); },
+        }, [element('span', { class: `palette-swatch swatch-${p}`, 'aria-hidden': 'true' }), element('span', { text: p[0].toUpperCase() + p.slice(1) })]))),
+        toolSlider('Sky strength', t.sky.strength, v => { t.sky.strength = v; requestRender(); }));
+    } else unavailable.push('Sky');
+    if ((info.coverage?.subject ?? 0) > 0.02 || info.kinds.includes('depth')) {
+        sections.push(element('h3', { class: 'section-title', text: 'Color focus' }), toolSlider('Color focus', t.colorFocus.strength, v => { t.colorFocus.strength = v; requestRender(); }));
+    } else unavailable.push('Color focus');
+    if (info.faces?.length) {
+        const pad = element('div', { class: 'light-pad', role: 'slider', tabindex: '0', 'aria-label': 'Light direction', 'aria-valuetext': `${Math.round(t.portraitLight.x * 100)}% across, ${Math.round(t.portraitLight.y * 100)}% down` });
+        const dot = element('span', { class: 'light-dot', 'aria-hidden': 'true' });
+        const place = () => { dot.style.left = `${t.portraitLight.x * 100}%`; dot.style.top = `${t.portraitLight.y * 100}%`; };
+        place();
+        pad.append(dot);
+        const move = (event) => {
+            const r = pad.getBoundingClientRect();
+            t.portraitLight.x = Math.min(1, Math.max(0, (event.clientX - r.left) / r.width));
+            t.portraitLight.y = Math.min(1, Math.max(0, (event.clientY - r.top) / r.height));
+            place();
+            requestRender();
+        };
+        pad.addEventListener('pointerdown', (event) => { pad.setPointerCapture(event.pointerId); move(event); pad.onpointermove = move; });
+        pad.addEventListener('pointerup', () => { pad.onpointermove = null; });
+        sections.push(element('h3', { class: 'section-title', text: 'Portrait light' }), toolSlider('Light strength', t.portraitLight.strength, v => { t.portraitLight.strength = v; requestRender(); }), element('p', { class: 'panel-note', text: 'Drag to move the light' }), pad);
+    } else unavailable.push('Portrait light');
+    if (info.kinds.includes('depth')) {
+        sections.push(element('h3', { class: 'section-title', text: 'Blur' }), toolSlider('Blur strength', t.blur.strength, v => { t.blur.strength = v; requestRender(); }), element('p', { class: 'panel-note', text: 'Tap the photo to choose what stays sharp' }));
+    } else unavailable.push('Blur');
+    if (unavailable.length) sections.push(element('p', { class: 'panel-note', text: `Not available for this photo: ${unavailable.join(', ')}` }));
+    panel.replaceChildren(...sections);
+}
+
+// In the Tools tab a tap on the photo sets the blur focus point
+canvas.addEventListener('click', (event) => {
+    if (state.tab !== 'tools' || !state.resultBitmap) return;
+    const box = stageBox();
+    const bmp = state.resultBitmap;
+    const s = Math.min(box.w / bmp.width, box.h / bmp.height);
+    const ox = box.x + (box.w - bmp.width * s) / 2;
+    const oy = box.y + (box.h - bmp.height * s) / 2;
+    const r = canvas.getBoundingClientRect();
+    const x = (event.clientX - r.left - ox) / (bmp.width * s);
+    const y = (event.clientY - r.top - oy) / (bmp.height * s);
+    if (x < 0 || x > 1 || y < 0 || y > 1) return;
+    state.recipe.tools.blur.focus = { x, y };
+    if (!state.recipe.tools.blur.strength) state.recipe.tools.blur.strength = 0.6;
+    renderToolsPanel();
+    requestRender();
+});
 
 const PANELS = { suggestions: renderSuggestionsPanel, crop: renderCropPanel, tools: renderToolsPanel, adjust: renderAdjustPanel, filters: renderFiltersPanel };
 
@@ -863,6 +959,8 @@ async function start() {
         state.proxy = { width: loaded.width, height: loaded.height };
         state.stats = loaded.stats;
         statusEl.hidden = true;
+        const t = state.recipe.tools;
+        if (t.sky.strength || t.colorFocus.strength || t.portraitLight.strength || t.blur.strength) await ensureMasks().catch(() => {});
         selectTab(new URLSearchParams(location.search).get('tab') || 'adjust');
     } catch (error) {
         statusEl.textContent = `Couldn't open the photo: ${error.message}`;

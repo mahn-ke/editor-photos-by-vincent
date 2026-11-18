@@ -19,7 +19,7 @@ function stripExtension(name) {
     return base.replace(/[^\w.-]+/g, '_').slice(0, 120) || 'photo';
 }
 
-export function createEditor({ immich, renderPool, log = console, onEvent = () => {} }) {
+export function createEditor({ immich, renderPool, maskStore = null, log = console, onEvent = () => {} }) {
     const jobs = new Map();
     let queue = Promise.resolve();
 
@@ -97,7 +97,10 @@ export function createEditor({ immich, renderPool, log = console, onEvent = () =
         if (original.type !== 'IMAGE') throw Object.assign(new Error('Only photos can be edited'), { status: 400 });
         const { decoded, from } = await sourcePixels(token, original);
         report(`Rendering ${decoded.width}×${decoded.height}`);
-        const rendered = await renderPool.render(decoded, recipe);
+        const t = recipe.tools;
+        const usesTools = t.sky.strength || t.colorFocus.strength || t.portraitLight.strength || t.blur.strength;
+        const masks = usesTools && maskStore ? await maskStore.load(token, originalId) : null;
+        const rendered = await renderPool.render(decoded, recipe, { masks });
         const dates = exifDates(original.fileCreatedAt, original.localDateTime);
         const jpeg = await encodeJpeg(rendered, { make: original.exifInfo?.make, model: original.exifInfo?.model, dates });
 

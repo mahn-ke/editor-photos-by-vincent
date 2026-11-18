@@ -6,6 +6,8 @@ import { createImmichClient } from './src/immich.js';
 import { createRenderPool } from './src/render.js';
 import { createLearner } from './src/learn.js';
 import { createGrader } from './src/ml/grader.js';
+import { createMasker } from './src/ml/masks.js';
+import { createMaskStore } from './src/mask-store.js';
 import { createApp } from './src/server.js';
 import { armPriors, createSuggester } from './src/suggest.js';
 import { openStore } from './src/sessions.js';
@@ -17,9 +19,11 @@ const renderPool = createRenderPool();
 const learner = createLearner({ db: store.db, priors: armPriors() });
 const grader = createGrader({ modelDir: config.modelDir });
 const suggester = createSuggester({ db: store.db, immich, grader, learner, dataDir: config.dataDir });
+const maskStore = createMaskStore({ masker: createMasker({ modelDir: config.modelDir }), immich, dataDir: config.dataDir });
 const editor = createEditor({
     immich,
     renderPool,
+    maskStore,
     onEvent: (event) => {
         if (!event.userId) return;
         if (event.type === 'manual-edit') suggester.manualEdit(event.userId, event.originalId, event.recipe);
@@ -44,7 +48,7 @@ const background = createBackground({
         afterPoll: async () => suggester.expire(),
     },
 });
-const app = createApp({ config, store, immich, editor, background, suggester });
+const app = createApp({ config, store, immich, editor, background, suggester, maskStore });
 background.start();
 
 store.prune();

@@ -1,11 +1,14 @@
 // Preview renderer: keeps a ≤1.6 MP copy of the photo and renders recipes on demand
-import { applyTone, fromRGBA8, render, resize, toRGBA8 } from './pipeline.js';
+import { applyTone, fromRGBA8, render, resize, toRGBA8, transformMasks } from './pipeline.js';
+import { applyTools } from './tools.js';
 import { normalizeRecipe } from './recipe.js';
 import { measure } from './auto.js';
 
 const PREVIEW_PIXELS = 1.6e6;
 let source = null;
 let thumb = null;
+let masks = null;
+const IDENTITY = { rotate90: 0, angle: 0, aspect: 'free', crop: null };
 
 const clone = img => ({ width: img.width, height: img.height, data: Float32Array.from(img.data) });
 
@@ -27,6 +30,24 @@ async function load(url) {
     return { width, height, stats: measure(source) };
 }
 
+async function loadMasks(info, base) {
+    const out = { width: info.width, height: info.height, faces: info.faces ?? [] };
+    for (const kind of info.kinds ?? []) {
+        const response = await fetch(`${base}/${kind}.png`, { credentials: 'same-origin' });
+        if (!response.ok) continue;
+        const bitmap = await createImageBitmap(await response.blob());
+        const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(bitmap, 0, 0);
+        const rgba = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+        const channel = new Float32Array(bitmap.width * bitmap.height);
+        for (let p = 0; p < channel.length; p++) channel[p] = rgba[p * 4] / 255;
+        out[kind] = channel;
+    }
+    masks = out;
+    return { kinds: Object.keys(out).filter(k => out[k] instanceof Float32Array), faces: out.faces.length };
+}
+
 function reply(id, img, extra = {}) {
     const rgba = toRGBA8(img);
     self.postMessage({ id, width: img.width, height: img.height, rgba, ...extra }, [rgba.buffer]);
@@ -40,8 +61,13 @@ self.onmessage = async ({ data }) => {
         } else if (type === 'render') {
             const recipe = normalizeRecipe(data.recipe);
             // 'tone' keeps the full frame (the crop tab draws rotation and crop itself)
-            const img = data.mode === 'tone' ? applyTone(clone(source), recipe) : render(source, recipe);
+            const tools = masks ? applyTools : null;
+            const img = data.mode === 'tone'
+                ? applyTone(clone(source), recipe, { masks: masks && transformMasks(masks, IDENTITY, source.width, source.height, source.width, source.height), tools })
+                : render(source, recipe, { masks, tools });
             reply(id, img);
+        } else if (type === 'masks') {
+            self.postMessage({ id, ...(await loadMasks(data.info, data.base)) });
         } else if (type === 'thumbs') {
             const results = data.recipes.map(recipe => {
                 const img = render(thumb, normalizeRecipe(recipe));

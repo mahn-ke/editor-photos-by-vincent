@@ -432,3 +432,50 @@ input[type=range]:focus-visible { outline: 2px solid var(--accent); outline-offs
 @media (prefers-reduced-motion: reduce) {
     .spinner { animation: none; }
 }
+
+/* ---- Tools ---- */
+
+.palette-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 12px; }
+
+.palette-chip {
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    border: 0;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.palette-swatch { width: 48px; height: 48px; border-radius: 50%; outline: 2px solid transparent; outline-offset: 2px; }
+.palette-chip.selected .palette-swatch { outline-color: var(--accent); }
+.palette-chip.selected span { color: var(--accent); }
+.swatch-vivid { background: linear-gradient(#1f52d9, #73b3fa); }
+.swatch-luminous { background: linear-gradient(#59a6fa, #d9f2ff); }
+.swatch-radiant { background: linear-gradient(#4d73d9, #ffc773); }
+.swatch-ember { background: linear-gradient(#734073, #ff7a2e); }
+.swatch-airy { background: linear-gradient(#9ec7f2, #e6f2ff); }
+.swatch-afterglow { background: linear-gradient(#6152b3, #ff9ead); }
+.swatch-stormy { background: linear-gradient(#383f52, #808794); }
+
+.light-pad {
+    position: relative;
+    height: 140px;
+    margin-top: 8px;
+    border-radius: 12px;
+    background: radial-gradient(circle at center, #3a3b40, #202125);
+    cursor: crosshair;
+    touch-action: none;
+}
+
+.light-dot {
+    position: absolute;
+    width: 22px;
+    height: 22px;
+    margin: -11px 0 0 -11px;
+    border-radius: 50%;
+    background: #fff6d6;
+    box-shadow: 0 0 18px 6px rgb(255 240 200 / 0.6);
+}

@@ -3,6 +3,7 @@ services:
   app:
     image: ghcr.io/mahn-ke/editor-photos-by-vincent:latest
     restart: unless-stopped
+    mem_limit: 3g
     ports:
       - "3024:3000"
     environment:
@@ -11,6 +12,8 @@ services:
       # no API key or client secret is needed here
       - IMMICH_BASE_URL=https://photos.by.vincent.mahn.ke
       - DATA_DIR=/app/data
+      # ML models (≈330 MB) are downloaded into the data volume on first use
+      - MODEL_DIR=/app/data/models
     volumes:
       - data:/app/data
     healthcheck:

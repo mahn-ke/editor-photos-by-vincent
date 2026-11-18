@@ -39,7 +39,7 @@ function sameToken(a, b) {
     return left.length === right.length && timingSafeEqual(left, right);
 }
 
-export function createApp({ config, store, immich, editor = null, background = null, suggester = null, log = console }) {
+export function createApp({ config, store, immich, editor = null, background = null, suggester = null, maskStore = null, log = console }) {
     const app = express();
     const secure = config.baseUrl.startsWith('https://');
     const sessionCookieOptions = { httpOnly: true, secure, sameSite: 'lax', path: '/' };
@@ -59,7 +59,8 @@ export function createApp({ config, store, immich, editor = null, background = n
     });
 
     app.get('/healthz', (req, res) => res.type('text').send('ok'));
-    app.use('/static', express.static(PUBLIC_DIR, { maxAge: '1h' }));
+    // Revalidate on every load (cheap 304s), so a deploy never leaves stale editor code behind
+    app.use('/static', express.static(PUBLIC_DIR, { maxAge: 0 }));
 
     app.use((req, res, next) => {
         req.cookies = parseCookies(req.headers.cookie);
@@ -323,6 +324,21 @@ export function createApp({ config, store, immich, editor = null, background = n
         await editor.show(req.session.token, originalId, editId);
         res.json({ ok: true });
     }));
+
+    // Tools masks: computed on first use (the Tools tab), then cached
+    app.get('/api/assets/:id/masks', requireSession, editorRoute(async (req, res) => {
+        const id = assetParam(req, res);
+        if (!id) return;
+        if (!maskStore) return res.status(503).json({ error: 'tools_unavailable' });
+        res.json(await maskStore.info(req.session.token, id));
+    }));
+
+    app.get('/api/assets/:id/masks/:kind', requireSession, (req, res) => {
+        if (!UUID.test(req.params.id)) return res.status(400).json({ error: 'invalid_asset' });
+        const bytes = maskStore?.png(req.params.id, req.params.kind.replace(/\.png$/, ''));
+        if (!bytes) return res.status(404).json({ error: 'not_found' });
+        res.set('Cache-Control', 'private, max-age=86400').type('image/png').send(bytes);
+    });
 
     app.get('/media/:id/:size', requireSession, asUser(async (req, res) => {
         const { id, size } = req.params;

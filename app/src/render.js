@@ -75,17 +75,17 @@ export function createRenderPool({ workerUrl = new URL('./render-worker.js', imp
         return worker;
     };
 
-    const run = (decoded, recipe, maxPixels) => new Promise((resolve, reject) => {
+    const run = (decoded, recipe, maxPixels, masks) => new Promise((resolve, reject) => {
         const id = nextId++;
         pending.set(id, { resolve, reject });
         const w = ensure();
         w.ref();
-        w.postMessage({ id, ...decoded, recipe, maxPixels }, [decoded.buffer]);
+        w.postMessage({ id, ...decoded, recipe, maxPixels, masks }, [decoded.buffer]);
     });
 
     return {
-        render(decoded, recipe, { maxPixels } = {}) {
-            const job = chain.then(() => run(decoded, recipe, maxPixels));
+        render(decoded, recipe, { maxPixels, masks = null } = {}) {
+            const job = chain.then(() => run(decoded, recipe, maxPixels, masks));
             chain = job.catch(() => {});
             return job;
         },
