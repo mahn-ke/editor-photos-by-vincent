@@ -104,7 +104,7 @@ describe('editor', () => {
         assert.equal(s.primaryAssetId, result.renderedAssetId);
         assert.equal(s.assetIds.length, 3);
         assert.equal(editsOf(photo.id).length, 2);
-        assert.equal(editsOf(photo.id)[1].source, 'suggestion');
+        assert.equal(editsOf(photo.id)[1].source, 'manual', 'only a real suggestion id marks a save as suggestion');
     });
 
     test('switching the shown version moves the stack primary', async () => {

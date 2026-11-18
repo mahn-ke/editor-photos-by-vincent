@@ -39,7 +39,7 @@ function sameToken(a, b) {
     return left.length === right.length && timingSafeEqual(left, right);
 }
 
-export function createApp({ config, store, immich, editor = null, background = null, log = console }) {
+export function createApp({ config, store, immich, editor = null, background = null, suggester = null, log = console }) {
     const app = express();
     const secure = config.baseUrl.startsWith('https://');
     const sessionCookieOptions = { httpOnly: true, secure, sameSite: 'lax', path: '/' };
@@ -107,6 +107,22 @@ export function createApp({ config, store, immich, editor = null, background = n
             }
             next(error);
         }
+    };
+
+    const jsonBody = express.json({ limit: '256kb' });
+    const editorRoute = handler => asUser(async (req, res) => {
+        if (!editor) return res.status(503).json({ error: 'editor_unavailable' });
+        try {
+            await handler(req, res);
+        } catch (error) {
+            if (error.status && error.status < 500) return res.status(error.status).json({ error: error.message });
+            throw error;
+        }
+    });
+    const assetParam = (req, res) => {
+        if (UUID.test(req.params.id)) return req.params.id;
+        res.status(400).json({ error: 'invalid_asset' });
+        return null;
     };
 
     app.get('/', (req, res) => {
@@ -203,6 +219,48 @@ export function createApp({ config, store, immich, editor = null, background = n
         page(res, 200, messagePage({ title: 'Background work stopped', message: 'The app deleted its Immich API key and upload webhook. Signing in again turns it back on.', action: { href: '/', label: 'Back to photos' } }));
     }));
 
+    // ---- Suggestions ----
+
+    app.get('/api/suggestions', requireSession, (req, res) => {
+        if (!suggester) return res.json({ suggestions: [] });
+        res.json(suggester.greeting(req.session.userId));
+    });
+
+    app.get('/api/suggestions/:id', requireSession, (req, res) => {
+        const row = suggester?.get(req.session.userId, req.params.id);
+        if (!row) return res.status(404).json({ error: 'not_found' });
+        res.json({ id: row.id, assetId: row.asset_id, name: row.name, why: row.why, recipe: row.recipe, status: row.status });
+    });
+
+    app.get('/api/suggestions/:id/:which', requireSession, (req, res) => {
+        if (!['before', 'after'].includes(req.params.which)) return res.status(404).json({ error: 'not_found' });
+        const bytes = suggester?.preview(req.session.userId, req.params.id, req.params.which);
+        if (!bytes) return res.status(404).json({ error: 'not_found' });
+        res.set('Cache-Control', 'private, max-age=86400').type('image/jpeg').send(bytes);
+    });
+
+    app.post('/api/suggestions/:id/apply', requireSession, jsonBody, editorRoute(async (req, res) => {
+        const row = suggester?.get(req.session.userId, req.params.id);
+        if (!row || row.status !== 'ready') return res.status(404).json({ error: 'not_found' });
+        suggester.setStatus(row.id, 'applying');
+        const userId = req.session.userId;
+        const job = editor.startSave({
+            token: req.session.token, userId, originalId: row.asset_id, recipe: row.recipe, source: 'suggestion',
+            onDone: () => suggester.accepted(userId, row.id, row.recipe),
+        });
+        res.status(202).json({ jobId: job.id });
+    }));
+
+    app.post('/api/suggestions/:id/dismiss', requireSession, (req, res) => {
+        if (!suggester?.dismiss(req.session.userId, req.params.id)) return res.status(404).json({ error: 'not_found' });
+        res.json({ ok: true });
+    });
+
+    app.post('/api/background/check', requireSession, (req, res) => {
+        background?.enqueue(req.session.userId, 'poll');
+        res.json({ ok: true });
+    });
+
     app.get('/api/timeline/buckets', requireSession, asUser(async (req, res) => {
         res.json(await immich.buckets(req.session.token));
     }));
@@ -221,22 +279,6 @@ export function createApp({ config, store, immich, editor = null, background = n
         page(res, 200, editorPage({ assetId: req.params.id, name: req.session.name }));
     });
 
-    const jsonBody = express.json({ limit: '256kb' });
-    const editorRoute = handler => asUser(async (req, res) => {
-        if (!editor) return res.status(503).json({ error: 'editor_unavailable' });
-        try {
-            await handler(req, res);
-        } catch (error) {
-            if (error.status && error.status < 500) return res.status(error.status).json({ error: error.message });
-            throw error;
-        }
-    });
-    const assetParam = (req, res) => {
-        if (UUID.test(req.params.id)) return req.params.id;
-        res.status(400).json({ error: 'invalid_asset' });
-        return null;
-    };
-
     app.get('/api/edit/:id', requireSession, editorRoute(async (req, res) => {
         const id = assetParam(req, res);
         if (id) res.json(await editor.context(req.session.token, id));
@@ -246,7 +288,14 @@ export function createApp({ config, store, immich, editor = null, background = n
         const id = assetParam(req, res);
         if (!id) return;
         const originalId = await editor.resolveOriginal(req.session.token, id);
-        const job = editor.startSave({ token: req.session.token, userId: req.session.userId, originalId, recipe: req.body?.recipe, source: req.body?.source });
+        const suggestionId = typeof req.body?.suggestionId === 'string' ? req.body.suggestionId : null;
+        const suggestion = suggestionId && suggester ? suggester.get(req.session.userId, suggestionId) : null;
+        const userId = req.session.userId;
+        const recipe = req.body?.recipe;
+        const job = editor.startSave({
+            token: req.session.token, userId, originalId, recipe, source: suggestion ? 'suggestion' : 'manual',
+            onDone: suggestion ? () => suggester.accepted(userId, suggestion.id, recipe) : null,
+        });
         res.status(202).json({ jobId: job.id });
     }));
 
@@ -262,7 +311,7 @@ export function createApp({ config, store, immich, editor = null, background = n
         const editId = req.body?.all === true ? 'all' : req.body?.editId;
         if (typeof editId !== 'string') return res.status(400).json({ error: 'invalid_edit' });
         const originalId = await editor.resolveOriginal(req.session.token, id);
-        res.json(await editor.discard(req.session.token, originalId, editId));
+        res.json(await editor.discard(req.session.token, originalId, editId, req.session.userId));
     }));
 
     app.post('/api/edit/:id/show', requireSession, jsonBody, editorRoute(async (req, res) => {

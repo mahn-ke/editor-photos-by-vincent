@@ -9,5 +9,6 @@ export function loadConfig(env = process.env) {
         immichUrl: immichUrl.href.replace(/\/+$/, ''),
         dataDir: env.DATA_DIR || path.join(process.cwd(), 'data'),
         appSecret: env.APP_SECRET || '',
+        modelDir: env.MODEL_DIR || path.join(env.DATA_DIR || path.join(process.cwd(), 'data'), 'models'),
     };
 }

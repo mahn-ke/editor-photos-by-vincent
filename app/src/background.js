@@ -114,6 +114,7 @@ export function createBackground({ db, immich, config, masterKey, log = console,
             q.upsertKey.run(userId, key.id, seal(masterKey, key.secret), row?.webhook_secret ?? randomBytes(24).toString('base64url'), now());
             row = q.user.get(userId);
             enqueue(userId, 'raw-backfill');
+            enqueue(userId, 'suggest-backfill', '', 5000);
             log.info?.(`Background processing enabled for user ${userId}`);
         }
         if (webhooksEnabled && !row.workflow_id) {
@@ -195,6 +196,7 @@ export function createBackground({ db, immich, config, masterKey, log = console,
             page = nextPage ? Number(nextPage) : null;
         }
         q.setPoll.run(started, userId);
+        await handlers.afterPoll?.(userId, auth);
         enqueue(userId, 'poll', '', POLL_MS);
     }
 

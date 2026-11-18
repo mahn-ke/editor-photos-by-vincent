@@ -659,7 +659,16 @@ function selectFilter(id) {
 function renderSuggestionsPanel() {
     const panel = $('panel-suggestions');
     const autos = state.stats ? autoRecipes(state.stats) : {};
+    const learned = state.suggestion ? [element('div', { class: 'suggestion-list' }, [element('button', {
+        type: 'button', class: 'suggestion-button',
+        onclick: () => {
+            state.recipe = normalizeRecipe(state.suggestion.recipe);
+            filterThumbs = null;
+            requestRender();
+        },
+    }, [element('span', { class: 'suggestion-icon', 'aria-hidden': 'true', text: '★' }), element('span', { text: `${state.suggestion.name} (suggested for you)` })])]), element('p', { class: 'panel-note', text: state.suggestion.why || '' })] : [];
     panel.replaceChildren(
+        ...(learned.length ? [element('h3', { class: 'section-title', text: 'Suggested for this photo' }), ...learned] : []),
         element('h3', { class: 'section-title', text: 'Suggestions' }),
         element('div', { class: 'suggestion-list' }, Object.entries(autos).map(([id, auto]) => element('button', {
             type: 'button', class: 'suggestion-button',
@@ -758,7 +767,7 @@ $('ed-save').addEventListener('click', async () => {
     overlay.hidden = false;
     $('ed-saving-text').textContent = 'Saving…';
     try {
-        const { jobId } = await api(`/api/edit/${state.context.original.id}/save`, { method: 'POST', body: JSON.stringify({ recipe: state.recipe, source: state.source ?? 'manual' }) });
+        const { jobId } = await api(`/api/edit/${state.context.original.id}/save`, { method: 'POST', body: JSON.stringify({ recipe: state.recipe, suggestionId: state.suggestion?.id ?? null }) });
         for (;;) {
             await new Promise(r => setTimeout(r, 800));
             const job = await api(`/api/jobs/${jobId}`);
@@ -843,6 +852,12 @@ async function start() {
         if (!state.context.editable) {
             statusEl.textContent = 'Only photos can be edited.';
             return;
+        }
+        const suggestionId = new URLSearchParams(location.search).get('suggestion');
+        if (suggestionId) {
+            // Start from the suggested edit; it counts as unsaved until you save it
+            state.suggestion = await api(`/api/suggestions/${encodeURIComponent(suggestionId)}`).catch(() => null);
+            if (state.suggestion?.recipe) state.recipe = normalizeRecipe(state.suggestion.recipe);
         }
         const loaded = await call('load', { url: `/media/${state.context.original.id}/preview` });
         state.proxy = { width: loaded.width, height: loaded.height };

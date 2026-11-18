@@ -4,16 +4,47 @@ import { loadConfig } from './src/config.js';
 import { createEditor } from './src/edits.js';
 import { createImmichClient } from './src/immich.js';
 import { createRenderPool } from './src/render.js';
+import { createLearner } from './src/learn.js';
+import { createGrader } from './src/ml/grader.js';
 import { createApp } from './src/server.js';
+import { armPriors, createSuggester } from './src/suggest.js';
 import { openStore } from './src/sessions.js';
 
 const config = loadConfig();
 const store = openStore(path.join(config.dataDir, 'sessions.sqlite'));
 const immich = createImmichClient({ baseUrl: config.immichUrl });
 const renderPool = createRenderPool();
-const editor = createEditor({ immich, renderPool });
-const background = createBackground({ db: store.db, immich, config, masterKey: loadMasterKey({ secret: config.appSecret, dataDir: config.dataDir }) });
-const app = createApp({ config, store, immich, editor, background });
+const learner = createLearner({ db: store.db, priors: armPriors() });
+const grader = createGrader({ modelDir: config.modelDir });
+const suggester = createSuggester({ db: store.db, immich, grader, learner, dataDir: config.dataDir });
+const editor = createEditor({
+    immich,
+    renderPool,
+    onEvent: (event) => {
+        if (!event.userId) return;
+        if (event.type === 'manual-edit') suggester.manualEdit(event.userId, event.originalId, event.recipe);
+        if (event.type === 'version-discarded') suggester.discardedVersion(event.userId, event.originalId, event);
+    },
+});
+const background = createBackground({
+    db: store.db, immich, config,
+    masterKey: loadMasterKey({ secret: config.appSecret, dataDir: config.dataDir }),
+    handlers: {
+        newAsset: async (userId, auth, asset) => {
+            if (asset.type === 'IMAGE') background.enqueue(userId, 'suggest', asset.id);
+        },
+        suggest: (userId, auth, assetId) => suggester.process(userId, auth, assetId),
+        // Fill the greeting with the last 4 weeks of uploads (up to 60 photos)
+        'suggest-backfill': async (userId, auth) => {
+            const since = new Date(Date.now() - 28 * 24 * 3600e3).toISOString();
+            const { items } = await immich.searchMetadata(auth, { createdAfter: since, type: 'IMAGE', size: 60, page: 1 });
+            for (const a of items) if (a.ownerId === undefined || a.ownerId === userId) background.enqueue(userId, 'suggest', a.id);
+            return 'ok';
+        },
+        afterPoll: async () => suggester.expire(),
+    },
+});
+const app = createApp({ config, store, immich, editor, background, suggester });
 background.start();
 
 store.prune();

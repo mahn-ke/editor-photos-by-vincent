@@ -127,6 +127,7 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
             height: 400,
             fileCreatedAt: `${asset.fileCreatedAt}Z`,
             fileModifiedAt: `${asset.fileCreatedAt}Z`,
+            createdAt: asset.createdAt ?? `${asset.fileCreatedAt}Z`,
             localDateTime: new Date(new Date(`${asset.fileCreatedAt}Z`).getTime() + 3600000).toISOString(),
             isTrashed: Boolean(asset.isTrashed),
             exifInfo: { make: 'Fake', model: 'Camera', latitude: 53.55, longitude: 9.99 },

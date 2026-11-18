@@ -178,8 +178,98 @@ timeline.addEventListener('click', (event) => {
     openViewer(Number(link.dataset.month), Number(link.dataset.asset));
 });
 
+// ---- Suggestions greeting ------------------------------------------------------
+
+async function postJson(url, body) {
+    const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json' }, credentials: 'same-origin', body: JSON.stringify(body ?? {}) });
+    if (response.status === 401) {
+        signIn();
+        throw new Error('Signed out');
+    }
+    const json = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(json.error || `HTTP ${response.status}`);
+    return json;
+}
+
+async function waitForJob(jobId, onStep) {
+    for (;;) {
+        await new Promise(r => setTimeout(r, 900));
+        const job = await getJson(`/api/jobs/${jobId}`);
+        onStep?.(job.step);
+        if (job.status === 'done') return job;
+        if (job.status === 'error') throw new Error(job.error || 'Saving failed');
+    }
+}
+
+function suggestionCard(item) {
+    const card = element('article', 'suggestion-card');
+    const figure = element('div', 'suggestion-figure');
+    const img = element('img');
+    img.alt = `${item.name}: suggested edit`;
+    img.src = `/api/suggestions/${item.id}/after`;
+    img.loading = 'lazy';
+    const compare = element('button', 'compare-button', 'Hold to compare');
+    compare.type = 'button';
+    const showBefore = (on) => {
+        img.src = `/api/suggestions/${item.id}/${on ? 'before' : 'after'}`;
+        compare.textContent = on ? 'Original' : 'Hold to compare';
+    };
+    compare.addEventListener('pointerdown', () => showBefore(true));
+    for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) compare.addEventListener(ev, () => showBefore(false));
+    figure.append(img, compare);
+    const body = element('div', 'suggestion-body');
+    body.append(element('h3', '', item.name), element('p', 'suggestion-why', item.why ? `Why: ${item.why}` : item.summary));
+    const actions = element('div', 'suggestion-actions');
+    const apply = element('button', 'button', 'Apply');
+    const edit = element('a', 'text-link', 'Edit');
+    const dismiss = element('button', 'text-button', 'Dismiss');
+    apply.type = 'button';
+    dismiss.type = 'button';
+    edit.href = `/edit/${item.assetId}?suggestion=${item.id}`;
+    apply.addEventListener('click', async () => {
+        apply.disabled = true;
+        dismiss.disabled = true;
+        try {
+            const { jobId } = await postJson(`/api/suggestions/${item.id}/apply`);
+            await waitForJob(jobId, step => { apply.textContent = `${step}…`; });
+            actions.replaceChildren(element('span', 'suggestion-done', 'Saved as a new version'));
+        } catch (error) {
+            apply.disabled = false;
+            dismiss.disabled = false;
+            apply.textContent = 'Apply';
+            body.append(element('p', 'suggestion-error', error.message));
+        }
+    });
+    dismiss.addEventListener('click', async () => {
+        await postJson(`/api/suggestions/${item.id}/dismiss`).catch(() => {});
+        card.remove();
+        if (!document.querySelector('.suggestion-card')) document.querySelector('.greeting')?.remove();
+    });
+    actions.append(apply, edit, dismiss);
+    body.append(actions);
+    card.append(figure, body);
+    return card;
+}
+
+async function loadGreeting() {
+    try {
+        const greeting = await getJson('/api/suggestions');
+        if (!greeting.suggestions?.length) return;
+        const section = element('section', 'greeting');
+        section.setAttribute('aria-label', 'Suggested edits');
+        section.append(element('h2', 'greeting-title', greeting.text));
+        const row = element('div', 'greeting-cards');
+        greeting.suggestions.forEach(item => row.append(suggestionCard(item)));
+        section.append(row);
+        timeline.prepend(section);
+    } catch {
+        // Suggestions are optional; the timeline works without them
+    }
+}
+
 async function init() {
     if (location.hash.startsWith('#asset=')) history.replaceState(null, '', location.pathname);
+    loadGreeting();
     try {
         const buckets = await getJson('/api/timeline/buckets');
         if (!buckets.length) {

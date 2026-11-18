@@ -38,9 +38,9 @@ function noise2(width, height, scale, seed) {
 
 const clamp = v => (v < 0 ? 0 : v > 255 ? 255 : v);
 
-export function chart(width = 2400, height = 1800) {
+export function chart(width = 2400, height = 1800, tiltDeg = 3.5) {
     const px = Buffer.alloc(width * height * 3);
-    const tilt = Math.tan((3.5 * Math.PI) / 180);
+    const tilt = Math.tan((tiltDeg * Math.PI) / 180);
     const patches = [
         [115, 82, 68], [194, 150, 130], [98, 122, 157], [87, 108, 67], [133, 128, 177], [103, 189, 170],
         [214, 126, 44], [80, 91, 166], [193, 90, 99], [94, 60, 108], [157, 188, 64], [224, 163, 46],
@@ -83,11 +83,11 @@ export function chart(width = 2400, height = 1800) {
     return { width, height, px };
 }
 
-export function cityscape(width = 2400, height = 1600) {
+export function cityscape(width = 2400, height = 1600, tiltDeg = 2.5) {
     const px = Buffer.alloc(width * height * 3);
     const octaves = [[320, 0.5], [160, 0.25], [80, 0.14], [40, 0.07], [20, 0.04]].map(([scale, amp], i) => [noise2(width, height * 2, scale, 11 + i), amp]);
     const fbm = (x, y) => octaves.reduce((sum, [n, amp]) => sum + n(x, y) * amp, 0);
-    const tilt = Math.tan((2.5 * Math.PI) / 180);
+    const tilt = Math.tan((tiltDeg * Math.PI) / 180);
     const r = rng(3);
     // Building outline: heights per column block
     const blocks = [];

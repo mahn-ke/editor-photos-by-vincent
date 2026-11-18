@@ -89,7 +89,7 @@ export function createEditor({ immich, renderPool, log = console, onEvent = () =
         };
     }
 
-    async function save(token, originalId, rawRecipe, source, report) {
+    async function save(token, originalId, rawRecipe, source, report, userId = null) {
         const recipe = normalizeRecipe(rawRecipe);
         if (isIdentity(recipe)) throw Object.assign(new Error('Nothing to save: the edit makes no changes'), { status: 400 });
         report('Loading the original');
@@ -133,11 +133,11 @@ export function createEditor({ immich, renderPool, log = console, onEvent = () =
 
         edits.push({ id: editId, createdAt: new Date().toISOString(), source: SOURCES.has(source) ? source : 'manual', renderedAssetId, recipe, from });
         await writeEdits(token, originalId, edits);
-        onEvent({ type: source === 'suggestion' ? 'suggestion-saved' : 'manual-edit', originalId, editId, recipe });
+        onEvent({ type: source === 'suggestion' ? 'suggestion-saved' : 'manual-edit', userId, originalId, editId, recipe });
         return { editId, renderedAssetId, width: rendered.width, height: rendered.height, from };
     }
 
-    async function discard(token, originalId, editId) {
+    async function discard(token, originalId, editId, userId = null) {
         const edits = await editsOf(token, originalId);
         const targets = editId === 'all' ? [...edits].reverse() : edits.filter(edit => edit.id === editId);
         if (!targets.length) throw Object.assign(new Error('No such edit'), { status: 404 });
@@ -165,7 +165,7 @@ export function createEditor({ immich, renderPool, log = console, onEvent = () =
             }
             await immich.trash(token, [edit.renderedAssetId]);
             await writeEdits(token, originalId, remainingEdits);
-            onEvent({ type: 'version-discarded', originalId, editId: edit.id, source: edit.source, recipe: edit.recipe });
+            onEvent({ type: 'version-discarded', userId, originalId, editId: edit.id, source: edit.source, recipe: edit.recipe });
         }
         return { remaining: remainingEdits.length };
     }
@@ -180,16 +180,21 @@ export function createEditor({ immich, renderPool, log = console, onEvent = () =
     }
 
     // Saves run one at a time; the browser polls the job
-    function startSave({ token, userId, originalId, recipe, source }) {
+    function startSave({ token, userId, originalId, recipe, source, onDone = null }) {
         const id = randomUUID();
         const job = { id, userId, status: 'queued', step: 'Waiting', result: null, error: null, createdAt: Date.now() };
         jobs.set(id, job);
         queue = queue.then(async () => {
             job.status = 'running';
             try {
-                job.result = await save(token, originalId, recipe, source, step => { job.step = step; });
+                job.result = await save(token, originalId, recipe, source, step => { job.step = step; }, userId);
                 job.status = 'done';
                 job.step = 'Saved';
+                try {
+                    onDone?.(job.result);
+                } catch (error) {
+                    log.warn(`After-save hook failed: ${error.message}`);
+                }
             } catch (error) {
                 job.status = 'error';
                 job.error = error.status && error.status < 500 ? error.message : 'Saving failed';

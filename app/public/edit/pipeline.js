@@ -5,6 +5,7 @@
 import { ADJUST_KEYS, normalizeRecipe } from './recipe.js';
 import { outputMapping, outputSize } from './geometry.js';
 import { FILTERS } from './filters.js';
+import './learned-presets.js';
 
 // Strength constants, tuned against Google Photos renders by the calibration harness
 export const CAL = {
