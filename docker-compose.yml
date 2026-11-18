@@ -1,16 +1,23 @@
 #http
-version: "3.8"
-
 services:
   app:
     image: ghcr.io/mahn-ke/editor-photos-by-vincent:latest
-    restart: on-failure:5
-    environment:
-      - PORT=3024
+    restart: unless-stopped
     ports:
       - "3024:3000"
+    environment:
+      - APP_BASE_URL=https://editor.photos.by.vincent.mahn.ke
+      # Sign-in runs through Immich's OAuth (Keycloak client "photos" in mahn-ke/repos);
+      # no API key or client secret is needed here
+      - IMMICH_BASE_URL=https://photos.by.vincent.mahn.ke
+      - DATA_DIR=/app/data
+    volumes:
+      - data:/app/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3024/healthz"]
+      test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
       interval: 30s
       timeout: 10s
       retries: 5
+
+volumes:
+  data:
