@@ -223,29 +223,42 @@ function suggestionCard(item) {
     const apply = element('button', 'button', 'Apply');
     const edit = element('a', 'text-link', 'Edit');
     const dismiss = element('button', 'text-button', 'Dismiss');
+    const replace = element('button', 'text-button', 'Apply & replace');
+    replace.type = 'button';
+    replace.title = 'Saves the edit and moves the original to Immich\'s trash';
     apply.type = 'button';
     dismiss.type = 'button';
     edit.href = `/edit/${item.assetId}?suggestion=${item.id}`;
-    apply.addEventListener('click', async () => {
+    const run = async (withReplace) => {
         apply.disabled = true;
         dismiss.disabled = true;
+        replace.disabled = true;
         try {
-            const { jobId } = await postJson(`/api/suggestions/${item.id}/apply`);
+            const { jobId } = await postJson(`/api/suggestions/${item.id}/apply`, { replace: withReplace });
             await waitForJob(jobId, step => { apply.textContent = `${step}…`; });
-            actions.replaceChildren(element('span', 'suggestion-done', 'Saved as a new version'));
+            actions.replaceChildren(element('span', 'suggestion-done', withReplace ? 'Saved; the original is in the trash' : 'Saved as a new version'));
         } catch (error) {
             apply.disabled = false;
             dismiss.disabled = false;
+            replace.disabled = false;
             apply.textContent = 'Apply';
             body.append(element('p', 'suggestion-error', error.message));
         }
+    };
+    apply.addEventListener('click', () => run(false));
+    // Destructive-ish: ask for a second click instead of a browser dialog
+    replace.addEventListener('click', () => {
+        if (replace.dataset.armed) return run(true);
+        replace.dataset.armed = '1';
+        replace.textContent = 'Click again: original → trash';
+        setTimeout(() => { delete replace.dataset.armed; replace.textContent = 'Apply & replace'; }, 4000);
     });
     dismiss.addEventListener('click', async () => {
         await postJson(`/api/suggestions/${item.id}/dismiss`).catch(() => {});
         card.remove();
         if (!document.querySelector('.suggestion-card')) document.querySelector('.greeting')?.remove();
     });
-    actions.append(apply, edit, dismiss);
+    actions.append(apply, replace, edit, dismiss);
     body.append(actions);
     card.append(figure, body);
     return card;

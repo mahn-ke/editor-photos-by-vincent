@@ -16,6 +16,6 @@ FROM base AS runtime
 COPY --from=test /tmp/tests-passed /tmp/tests-passed
 COPY . .
 # Models are downloaded on first use into the data volume (pinned by sha256)
-ENV NODE_ENV=production DATA_DIR=/app/data MODEL_DIR=/app/data/models
+ENV NODE_ENV=production DATA_DIR=/app/data CACHE_DIR=/app/cache MODEL_DIR=/app/cache/models
 EXPOSE 3000
 CMD ["node", "main.js"]

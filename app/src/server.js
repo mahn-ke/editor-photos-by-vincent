@@ -77,6 +77,65 @@ export function createApp({ config, store, immich, editor = null, background = n
         res.status(202).json({ ok: true });
     });
 
+    // ---- Mobile API (the Immich app fork): authenticated with the app's own Immich token ----
+    const mobileTokens = new Map(); // sha256(token) → { userId, until }
+    const mobileAuth = async (req, res, next) => {
+        const token = /^Bearer (.+)$/.exec(req.get('authorization') || '')?.[1];
+        if (!token) return res.status(401).json({ error: 'token_required' });
+        const key = createHash('sha256').update(token).digest('hex');
+        const cached = mobileTokens.get(key);
+        try {
+            if (!cached || cached.until < Date.now()) {
+                const me = await immich.me(token);
+                mobileTokens.set(key, { userId: me.id, until: Date.now() + 5 * 60 * 1000 });
+                if (mobileTokens.size > 1000) mobileTokens.delete(mobileTokens.keys().next().value);
+            }
+        } catch (error) {
+            mobileTokens.delete(key);
+            return res.status(error.name === 'ImmichUnauthorized' ? 401 : 502).json({ error: 'invalid_token' });
+        }
+        req.mobile = { token, userId: mobileTokens.get(key).userId };
+        res.set('Cache-Control', 'private, no-store');
+        next();
+    };
+    app.get('/api/mobile/info', (req, res) => res.json({ service: 'editor-photos', apiVersion: 1, features: ['suggestions', 'masks', 'feedback'] }));
+    app.get('/api/mobile/suggestions', mobileAuth, (req, res) => {
+        const greeting = suggester ? suggester.greeting(req.mobile.userId) : { suggestions: [] };
+        res.json(greeting);
+    });
+    app.get('/api/mobile/suggestions/:id/:which', mobileAuth, (req, res) => {
+        if (!['before', 'after'].includes(req.params.which)) return res.status(404).json({ error: 'not_found' });
+        const bytes = suggester?.preview(req.mobile.userId, req.params.id, req.params.which);
+        if (!bytes) return res.status(404).json({ error: 'not_found' });
+        res.set('Cache-Control', 'private, max-age=86400').type('image/jpeg').send(bytes);
+    });
+    app.post('/api/mobile/suggestions/:id/feedback', express.json({ limit: '256kb' }), mobileAuth, (req, res) => {
+        const action = req.body?.action;
+        const row = suggester?.get(req.mobile.userId, req.params.id);
+        if (!row) return res.status(404).json({ error: 'not_found' });
+        if (action === 'dismissed') suggester.dismiss(req.mobile.userId, row.id);
+        else if (action === 'applied' || action === 'tweaked') suggester.accepted(req.mobile.userId, row.id, action === 'tweaked' && req.body?.recipe ? req.body.recipe : row.recipe);
+        else return res.status(400).json({ error: 'invalid_action' });
+        res.json({ ok: true });
+    });
+    app.get('/api/mobile/assets/:id/masks', mobileAuth, async (req, res, next) => {
+        if (!UUID.test(req.params.id)) return res.status(400).json({ error: 'invalid_asset' });
+        if (!maskStore) return res.status(503).json({ error: 'tools_unavailable' });
+        try {
+            res.json(await maskStore.info(req.mobile.token, req.params.id));
+        } catch (error) {
+            next(error);
+        }
+    });
+    app.get('/api/mobile/assets/:id/masks/:kind', mobileAuth, async (req, res) => {
+        if (!UUID.test(req.params.id)) return res.status(400).json({ error: 'invalid_asset' });
+        // Cached masks are only served to users who can see the photo
+        if (!(await immich.asset(req.mobile.token, req.params.id).then(() => true, () => false))) return res.status(404).json({ error: 'not_found' });
+        const bytes = maskStore?.png(req.params.id, req.params.kind.replace(/\.png$/, ''));
+        if (!bytes) return res.status(404).json({ error: 'not_found' });
+        res.set('Cache-Control', 'private, max-age=86400').type('image/png').send(bytes);
+    });
+
     // State-changing requests must come from our own pages
     app.use((req, res, next) => {
         if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
@@ -247,7 +306,7 @@ export function createApp({ config, store, immich, editor = null, background = n
         suggester.setStatus(row.id, 'applying');
         const userId = req.session.userId;
         const job = editor.startSave({
-            token: req.session.token, userId, originalId: row.asset_id, recipe: row.recipe, source: 'suggestion',
+            token: req.session.token, userId, originalId: row.asset_id, recipe: row.recipe, source: 'suggestion', replace: req.body?.replace === true,
             onDone: () => suggester.accepted(userId, row.id, row.recipe),
         });
         res.status(202).json({ jobId: job.id });
@@ -333,7 +392,7 @@ export function createApp({ config, store, immich, editor = null, background = n
         const userId = req.session.userId;
         const recipe = req.body?.recipe;
         const job = editor.startSave({
-            token: req.session.token, userId, originalId, recipe, source: suggestion ? 'suggestion' : 'manual',
+            token: req.session.token, userId, originalId, recipe, source: suggestion ? 'suggestion' : 'manual', replace: req.body?.replace === true,
             onDone: suggestion ? () => suggester.accepted(userId, suggestion.id, recipe) : null,
         });
         res.status(202).json({ jobId: job.id });
@@ -391,8 +450,9 @@ export function createApp({ config, store, immich, editor = null, background = n
         res.json(await maskStore.info(req.session.token, id));
     }));
 
-    app.get('/api/assets/:id/masks/:kind', requireSession, (req, res) => {
+    app.get('/api/assets/:id/masks/:kind', requireSession, async (req, res) => {
         if (!UUID.test(req.params.id)) return res.status(400).json({ error: 'invalid_asset' });
+        if (!(await immich.asset(req.session.token, req.params.id).then(() => true, () => false))) return res.status(404).json({ error: 'not_found' });
         const bytes = maskStore?.png(req.params.id, req.params.kind.replace(/\.png$/, ''));
         if (!bytes) return res.status(404).json({ error: 'not_found' });
         res.set('Cache-Control', 'private, max-age=86400').type('image/png').send(bytes);

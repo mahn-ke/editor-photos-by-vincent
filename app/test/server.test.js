@@ -205,3 +205,18 @@ describe('sign-out', () => {
         assert.match(await signedOut.text(), /Sign in again/);
     });
 });
+
+describe('mobile API', () => {
+    test('needs a valid Immich token and serves the user\'s suggestions', async () => {
+        assert.equal((await fetch(`${stack.baseUrl}/api/mobile/info`).then(r => r.json())).service, 'editor-photos');
+        assert.equal((await fetch(`${stack.baseUrl}/api/mobile/suggestions`)).status, 401);
+        assert.equal((await fetch(`${stack.baseUrl}/api/mobile/suggestions`, { headers: { authorization: 'Bearer nope' } })).status, 401);
+        const token = 'mobile-test-token';
+        stack.fake.tokens.add(token);
+        const res = await fetch(`${stack.baseUrl}/api/mobile/suggestions`, { headers: { authorization: `Bearer ${token}` } });
+        assert.equal(res.status, 200);
+        assert.ok(Array.isArray((await res.json()).suggestions));
+        const feedback = await fetch(`${stack.baseUrl}/api/mobile/suggestions/unknown/feedback`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'dismissed' }) });
+        assert.equal(feedback.status, 404, 'no Origin header needed, unknown suggestion is 404');
+    });
+});

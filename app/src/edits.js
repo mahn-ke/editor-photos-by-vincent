@@ -89,7 +89,7 @@ export function createEditor({ immich, renderPool, maskStore = null, log = conso
         };
     }
 
-    async function save(token, originalId, rawRecipe, source, report, userId = null) {
+    async function save(token, originalId, rawRecipe, source, report, userId = null, { replace = false } = {}) {
         const recipe = normalizeRecipe(rawRecipe);
         if (isIdentity(recipe)) throw Object.assign(new Error('Nothing to save: the edit makes no changes'), { status: 400 });
         report('Loading the original');
@@ -134,7 +134,25 @@ export function createEditor({ immich, renderPool, maskStore = null, log = conso
         const currentPrimary = fresh.stack?.primaryAssetId ?? originalId;
         await immich.createStack(token, [renderedAssetId, currentPrimary]);
 
-        edits.push({ id: editId, createdAt: new Date().toISOString(), source: SOURCES.has(source) ? source : 'manual', renderedAssetId, recipe, from });
+        const entry = { id: editId, createdAt: new Date().toISOString(), source: SOURCES.has(source) ? source : 'manual', renderedAssetId, recipe, from };
+        if (replace) {
+            // The edit takes the original's place: the history moves to the new asset, the
+            // original leaves the stack and goes to Immich's trash (recoverable for 30 days)
+            report('Replacing the original');
+            await immich.setMetadata(token, renderedAssetId, EDITS_KEY, { v: 1, edits: [...edits, { ...entry, replacedOriginalId: originalId }] });
+            await immich.setMetadata(token, renderedAssetId, RENDER_KEY, { v: 1, originalId: renderedAssetId, editId, replacedOriginalId: originalId });
+            const stacked = await immich.asset(token, renderedAssetId);
+            if (stacked.stack?.id) {
+                const stack = await immich.stack(token, stacked.stack.id).catch(() => null);
+                const members = (stack?.assets ?? []).map(a => a.id);
+                if (members.filter(id => id !== originalId).length < 2) await immich.deleteStack(token, stacked.stack.id);
+                else await immich.removeFromStack(token, stacked.stack.id, originalId);
+            }
+            await immich.trash(token, [originalId]);
+            onEvent({ type: source === 'suggestion' ? 'suggestion-saved' : 'manual-edit', userId, originalId, editId, recipe, replaced: true });
+            return { editId, renderedAssetId, width: rendered.width, height: rendered.height, from, replaced: true };
+        }
+        edits.push(entry);
         await writeEdits(token, originalId, edits);
         onEvent({ type: source === 'suggestion' ? 'suggestion-saved' : 'manual-edit', userId, originalId, editId, recipe });
         return { editId, renderedAssetId, width: rendered.width, height: rendered.height, from };
@@ -183,14 +201,14 @@ export function createEditor({ immich, renderPool, maskStore = null, log = conso
     }
 
     // Saves run one at a time; the browser polls the job
-    function startSave({ token, userId, originalId, recipe, source, onDone = null }) {
+    function startSave({ token, userId, originalId, recipe, source, replace = false, onDone = null }) {
         const id = randomUUID();
         const job = { id, userId, status: 'queued', step: 'Waiting', result: null, error: null, createdAt: Date.now() };
         jobs.set(id, job);
         queue = queue.then(async () => {
             job.status = 'running';
             try {
-                job.result = await save(token, originalId, recipe, source, step => { job.step = step; }, userId);
+                job.result = await save(token, originalId, recipe, source, step => { job.step = step; }, userId, { replace });
                 job.status = 'done';
                 job.step = 'Saved';
                 try {

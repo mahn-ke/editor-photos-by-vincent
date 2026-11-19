@@ -12,10 +12,15 @@ services:
       # no API key or client secret is needed here
       - IMMICH_BASE_URL=https://photos.by.vincent.mahn.ke
       - DATA_DIR=/app/data
-      # ML models (≈330 MB) are downloaded into the data volume on first use
-      - MODEL_DIR=/app/data/models
+      # ML models (≈330 MB) and the mask/RAW caches can be re-created, so they live in an
+      # anonymous volume: kept across redeploys, but not picked up by the backup workflow
+      # (it only backs up named volumes). /app/data (sessions, encrypted API keys, learner
+      # state, suggestions) stays backed up.
+      - CACHE_DIR=/app/cache
+      - MODEL_DIR=/app/cache/models
     volumes:
       - data:/app/data
+      - /app/cache
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/healthz"]
       interval: 30s

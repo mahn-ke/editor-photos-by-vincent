@@ -272,8 +272,17 @@ function onCropPointerDown(event) {
     const hit = hitHandle(x, y);
     if (hit === null) return;
     clearTimeout(state.crop.refitTimer);
-    canvas.setPointerCapture(event.pointerId);
-    state.crop.drag = { hit, x0: x, y0: y, frame0: { ...state.crop.frame }, rect0: { ...state.crop.rect }, anchor0: { ...state.crop.anchor } };
+    try {
+        canvas.setPointerCapture(event.pointerId);
+    } catch {
+        // synthetic events (tests) have no capturable pointer
+    }
+    const fixedCorner = hit === 'pan' ? null : corners(state.crop.frame)[3 - hit];
+    state.crop.drag = {
+        hit, x0: x, y0: y, frame0: { ...state.crop.frame }, rect0: { ...state.crop.rect }, anchor0: { ...state.crop.anchor },
+        fixedImage: fixedCorner ? toImage(fixedCorner[0], fixedCorner[1]) : null,
+        pointer: { x, y },
+    };
     state.crop.grid = 'thirds';
 }
 
@@ -297,41 +306,87 @@ function onCropPointerMove(event) {
         draw();
         return;
     }
-    // Corner drag: the opposite corner stays fixed on screen
-    const f0 = d.frame0;
-    const fixed = corners(f0)[3 - d.hit];
-    const aspect = currentAspect();
-    let nx = x;
-    let ny = y;
-    const minSize = 48;
-    let w = Math.max(minSize, Math.abs(nx - fixed[0]));
-    let h = Math.max(minSize, Math.abs(ny - fixed[1]));
-    if (aspect) {
-        if (w / h > aspect) w = h * aspect;
-        else h = w / aspect;
-    }
+    d.pointer = { x, y };
+    if (cornerDragUpdate()) startEdgeGrowth();
+}
+
+// Corner drag like Google Photos: the opposite corner stays pinned to the same spot of the
+// image. When the frame outgrows the screen the view zooms out around that corner, and
+// holding the pointer at the edge keeps revealing more of the photo, always within its bounds.
+function cornerDragUpdate() {
+    const c = state.crop;
+    const d = c?.drag;
+    if (!d || d.hit === 'pan') return false;
+    const { width: W, height: H } = orientedDims();
+    const angle = state.recipe.geometry.angle;
+    const box = stageBox();
+    const fixed = toScreen(d.fixedImage.x, d.fixedImage.y);
     const left = d.hit === 0 || d.hit === 2;
     const top = d.hit === 0 || d.hit === 1;
-    const candidate = (scale) => {
-        const cw = Math.max(minSize, scale * w + (1 - scale) * f0.w);
-        const ch = aspect ? cw / aspect : Math.max(minSize, scale * h + (1 - scale) * f0.h);
-        return { x: left ? fixed[0] - cw : fixed[0], y: top ? fixed[1] - ch : fixed[1], w: cw, h: ch };
-    };
-    // Largest step towards the pointer that keeps the crop inside the rotated image
+    const px = d.pointer.x;
+    const py = d.pointer.y;
+    const minSize = 48;
+    const x = Math.min(box.x + box.w, Math.max(box.x, px));
+    const y = Math.min(box.y + box.h, Math.max(box.y, py));
+    let w = Math.max(minSize, left ? fixed.x - x : x - fixed.x);
+    let h = Math.max(minSize, top ? fixed.y - y : y - fixed.y);
+    const atEdgeX = left ? px <= box.x + 18 : px >= box.x + box.w - 18;
+    const atEdgeY = top ? py <= box.y + 18 : py >= box.y + box.h - 18;
+    if (atEdgeX) w *= 1.035;
+    if (atEdgeY) h *= 1.035;
+    const aspect = currentAspect();
+    if (aspect) {
+        if (atEdgeX || atEdgeY) {
+            // Growing at an edge: let the edge-touching side lead, the other follows the ratio
+            if (atEdgeX && !atEdgeY) h = w / aspect;
+            else if (atEdgeY && !atEdgeX) w = h * aspect;
+            else if (w / h > aspect) h = w / aspect; else w = h * aspect;
+        } else if (w / h > aspect) w = h * aspect;
+        else h = w / aspect;
+    }
+    const frameAt = (fw, fh) => ({ x: left ? fixed.x - fw : fixed.x, y: top ? fixed.y - fh : fixed.y, w: fw, h: fh });
+    const current = c.frame;
+    const candidate = t => frameAt(current.w + (w - current.w) * t, current.h + (h - current.h) * t);
     let frame = candidate(1);
     if (!fitsInside(frameToRect(frame), W, H, angle)) {
         let lo = 0;
         let hi = 1;
-        for (let i = 0; i < 12; i++) {
+        for (let i = 0; i < 14; i++) {
             const mid = (lo + hi) / 2;
             if (fitsInside(frameToRect(candidate(mid)), W, H, angle)) lo = mid;
             else hi = mid;
         }
         frame = candidate(lo);
     }
+    const rect = frameToRect(frame);
+    // Zoom out around the pinned corner if the frame no longer fits the stage
+    const availW = left ? fixed.x - box.x : box.x + box.w - fixed.x;
+    const availH = top ? fixed.y - box.y : box.y + box.h - fixed.y;
+    const k = Math.min(1, availW / frame.w, availH / frame.h);
+    if (k < 1) {
+        c.anchor = { sx: fixed.x, sy: fixed.y, ix: d.fixedImage.x, iy: d.fixedImage.y, scale: c.anchor.scale * k };
+        frame = frameAt(frame.w * k, frame.h * k);
+    }
     c.frame = frame;
-    c.rect = frameToRect(frame);
+    c.rect = rect;
     draw();
+    const grew = Math.abs(rect.w - (d.lastRectW ?? 0)) > 0.5 || Math.abs(rect.h - (d.lastRectH ?? 0)) > 0.5;
+    d.lastRectW = rect.w;
+    d.lastRectH = rect.h;
+    return (atEdgeX || atEdgeY) && grew;
+}
+
+// While the pointer rests at the stage edge, keep extending every frame
+function startEdgeGrowth() {
+    const d = state.crop?.drag;
+    if (!d || d.growing) return;
+    d.growing = true;
+    const tick = () => {
+        if (state.crop?.drag !== d) return;
+        if (cornerDragUpdate()) requestAnimationFrame(tick);
+        else d.growing = false;
+    };
+    requestAnimationFrame(tick);
 }
 
 function onCropPointerUp() {
@@ -346,8 +401,9 @@ function onCropPointerUp() {
 function setAngle(value, { fine = false } = {}) {
     const g = state.recipe.geometry;
     let angle = Math.max(-MAX_ANGLE, Math.min(MAX_ANGLE, value));
-    angle = fine ? Math.round(angle * 10) / 10 : Math.round(angle);
-    if (!fine && Math.abs(angle) < 0.3) angle = 0;
+    // Continuous like Google's dial: 0.01° internally, shown with one decimal; snaps to level near 0
+    angle = fine ? Math.round(angle * 100) / 100 : Math.round(angle);
+    if (Math.abs(angle) < 0.15) angle = 0;
     if (angle === g.angle) return;
     const c = state.crop;
     const { width: W, height: H } = orientedDims();
@@ -420,8 +476,9 @@ ruler.addEventListener('pointermove', (event) => {
     if (!rulerDrag) return;
     if (event.shiftKey !== rulerDrag.fine) rulerDrag = { x: event.clientX, angle: state.recipe.geometry.angle, fine: event.shiftKey };
     const dx = event.clientX - rulerDrag.x;
+    // Smooth drag (no whole-degree steps); Shift slows it down ten-fold for fine work
     const perDeg = rulerDrag.fine ? PX_PER_DEG * 10 : PX_PER_DEG;
-    setAngle(rulerDrag.angle - dx / perDeg, { fine: rulerDrag.fine });
+    setAngle(rulerDrag.angle - dx / perDeg, { fine: true });
 });
 const stopRulerDrag = () => {
     if (!rulerDrag) return;
@@ -819,6 +876,7 @@ const isDirty = () => !recipesEqual(state.recipe, state.initial);
 
 function updateDirty() {
     $('ed-save').disabled = !isDirty() || state.saving;
+    $('ed-save-replace').disabled = !isDirty() || state.saving;
 }
 
 window.addEventListener('beforeunload', (event) => {
@@ -861,7 +919,15 @@ async function api(path, options = {}) {
     return body;
 }
 
-$('ed-save').addEventListener('click', async () => {
+$('ed-save-replace').addEventListener('click', () => $('ed-replace-dialog').showModal());
+$('ed-replace-cancel').addEventListener('click', () => $('ed-replace-dialog').close());
+$('ed-replace-confirm').addEventListener('click', () => {
+    $('ed-replace-dialog').close();
+    saveEdit(true);
+});
+$('ed-save').addEventListener('click', () => saveEdit(false));
+
+async function saveEdit(replace) {
     if (!isDirty() || state.saving) return;
     state.saving = true;
     updateDirty();
@@ -869,7 +935,7 @@ $('ed-save').addEventListener('click', async () => {
     overlay.hidden = false;
     $('ed-saving-text').textContent = 'Saving…';
     try {
-        const { jobId } = await api(`/api/edit/${state.context.original.id}/save`, { method: 'POST', body: JSON.stringify({ recipe: state.recipe, suggestionId: state.suggestion?.id ?? null }) });
+        const { jobId } = await api(`/api/edit/${state.context.original.id}/save`, { method: 'POST', body: JSON.stringify({ recipe: state.recipe, suggestionId: state.suggestion?.id ?? null, replace }) });
         for (;;) {
             await new Promise(r => setTimeout(r, 800));
             const job = await api(`/api/jobs/${jobId}`);
@@ -885,7 +951,7 @@ $('ed-save').addEventListener('click', async () => {
         updateDirty();
         alertInline(`Couldn't save: ${error.message}`);
     }
-});
+}
 
 function alertInline(message) {
     statusEl.textContent = message;

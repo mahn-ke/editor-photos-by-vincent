@@ -1,3 +1,4 @@
+import { rmSync } from 'node:fs';
 import path from 'node:path';
 import { createBackground, loadMasterKey } from './src/background.js';
 import { loadConfig } from './src/config.js';
@@ -14,13 +15,18 @@ import { armPriors, createSuggester } from './src/suggest.js';
 import { openStore } from './src/sessions.js';
 
 const config = loadConfig();
+
+// Caches used to live in the (backed-up) data volume; drop those copies once they moved
+if (path.resolve(config.cacheDir) !== path.resolve(config.dataDir)) {
+    for (const dir of ['models', 'masks', 'raw']) rmSync(path.join(config.dataDir, dir), { recursive: true, force: true });
+}
 const store = openStore(path.join(config.dataDir, 'sessions.sqlite'));
 const immich = createImmichClient({ baseUrl: config.immichUrl });
 const renderPool = createRenderPool();
 const learner = createLearner({ db: store.db, priors: armPriors() });
 const grader = createGrader({ modelDir: config.modelDir });
 const suggester = createSuggester({ db: store.db, immich, grader, learner, dataDir: config.dataDir });
-const maskStore = createMaskStore({ masker: createMasker({ modelDir: config.modelDir }), immich, dataDir: config.dataDir });
+const maskStore = createMaskStore({ masker: createMasker({ modelDir: config.modelDir }), immich, dataDir: config.cacheDir });
 const editor = createEditor({
     immich,
     renderPool,
@@ -49,7 +55,7 @@ const background = createBackground({
         afterPoll: async () => suggester.expire(),
     },
 });
-const rawService = createRawService({ immich, dataDir: config.dataDir });
+const rawService = createRawService({ immich, dataDir: config.cacheDir });
 const app = createApp({ config, store, immich, editor, background, suggester, maskStore, rawService });
 background.start();
 

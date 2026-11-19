@@ -51,7 +51,9 @@ Photos' layout:
 Immich asset, stacks it on top of the original (so it is the version shown) and appends the
 settings to the original's metadata (`editor-photos`). Every save is a new version;
 **Versions** lets you show any of them or discard one or all (discarded versions go to
-Immich's trash). Leaving with unsaved changes asks "Discard changes?".
+Immich's trash). Leaving with unsaved changes asks "Discard changes?". **Save & replace original** (also
+**Apply & replace** on suggestion cards) saves the edit as the photo itself: the original leaves
+the stack and goes to Immich's trash (30 days), and the edit history moves to the new photo.
 
 ## Suggestions and background work
 
@@ -69,6 +71,21 @@ the JPEG shown. The menu can unstack them or stop all background work. See
 Models (≈330 MB, all permissively licensed, pinned by sha256) are downloaded into
 `MODEL_DIR` on first use.
 
+## Mobile API (for the Immich app fork)
+
+The app derives this server from its Immich URL (`editor.` + host) and authenticates with its own
+Immich token (`Authorization: Bearer`, validated against Immich): `GET /api/mobile/info`,
+`GET /api/mobile/suggestions`, `GET /api/mobile/suggestions/:id/(before|after)`,
+`POST /api/mobile/suggestions/:id/feedback` (`applied` / `tweaked` / `dismissed`),
+`GET /api/mobile/assets/:id/masks` and `…/masks/:kind.png`.
+
+## Storage
+
+- `DATA_DIR` (`/app/data`, backed up): sessions, encrypted background API keys, learner state and
+  feedback, suggestions and their previews, `master.key`.
+- `CACHE_DIR` (`/app/cache`, anonymous volume, not backed up): the ML models and the mask and
+  RAW caches; all of it is re-created on demand.
+
 ## Configuration
 
 | Variable | Default |
@@ -77,7 +94,8 @@ Models (≈330 MB, all permissively licensed, pinned by sha256) are downloaded i
 | `IMMICH_BASE_URL` | `https://photos.by.vincent.mahn.ke` |
 | `DATA_DIR` | `./data` (session database) |
 | `PORT` | `3000` |
-| `MODEL_DIR` | `$DATA_DIR/models` |
+| `CACHE_DIR` | `$DATA_DIR` |
+| `MODEL_DIR` | `$CACHE_DIR/models` |
 | `APP_SECRET` | key for the stored API keys (default: generated `data/master.key`) |
 
 ## Development

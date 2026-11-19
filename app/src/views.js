@@ -91,6 +91,7 @@ export function editorPage({ assetId }) {
         <button class="icon-button" type="button" id="ed-close" aria-label="Close">${ICONS.close}</button>
         <div class="editor-top-actions">
             <button class="text-button" type="button" id="ed-versions" hidden>Versions</button>
+            <button class="text-button" type="button" id="ed-save-replace" disabled title="Saves the edit and moves the original to Immich's trash">Save &amp; replace original</button>
             <button class="button" type="button" id="ed-save" disabled>Save</button>
         </div>
     </header>
@@ -120,6 +121,14 @@ export function editorPage({ assetId }) {
     <div class="dialog-actions">
         <button class="text-button" type="button" id="ed-keep">Keep editing</button>
         <button class="text-button" type="button" id="ed-discard">Discard</button>
+    </div>
+</dialog>
+<dialog class="editor-dialog" id="ed-replace-dialog" aria-labelledby="ed-replace-title">
+    <h2 id="ed-replace-title">Replace the original?</h2>
+    <p>The edited photo takes its place. The original moves to Immich's trash, where it stays for 30 days.</p>
+    <div class="dialog-actions">
+        <button class="text-button" type="button" id="ed-replace-cancel">Cancel</button>
+        <button class="text-button danger" type="button" id="ed-replace-confirm">Save &amp; replace</button>
     </div>
 </dialog>
 <dialog class="editor-dialog versions-dialog" id="ed-versions-dialog" aria-labelledby="ed-versions-title">

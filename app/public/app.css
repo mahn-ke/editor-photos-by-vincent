@@ -538,6 +538,7 @@ a.icon-button {
 
 .suggestion-actions {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: 10px;
     margin-top: 6px;

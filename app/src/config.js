@@ -9,6 +9,8 @@ export function loadConfig(env = process.env) {
         immichUrl: immichUrl.href.replace(/\/+$/, ''),
         dataDir: env.DATA_DIR || path.join(process.cwd(), 'data'),
         appSecret: env.APP_SECRET || '',
-        modelDir: env.MODEL_DIR || path.join(env.DATA_DIR || path.join(process.cwd(), 'data'), 'models'),
+        // Re-creatable data (models, mask and RAW caches) lives apart from what must be backed up
+        cacheDir: env.CACHE_DIR || env.DATA_DIR || path.join(process.cwd(), 'data'),
+        modelDir: env.MODEL_DIR || path.join(env.CACHE_DIR || env.DATA_DIR || path.join(process.cwd(), 'data'), 'models'),
     };
 }

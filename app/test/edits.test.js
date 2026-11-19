@@ -169,3 +169,25 @@ describe('editor', () => {
         await call(`/api/edit/${photo.id}/discard`, { all: true });
     });
 });
+
+describe('apply and replace original', () => {
+    test('the edit takes the original\'s place, the original goes to the trash', async () => {
+        const other = library[0].assets.filter(a => a.isImage)[1];
+        const started = await call(`/api/edit/${other.id}/save`, { recipe: RECIPE, replace: true });
+        let job;
+        for (let i = 0; i < 100; i++) {
+            job = (await call(`/api/jobs/${started.body.jobId}`)).body;
+            if (job.status === 'done' || job.status === 'error') break;
+            await new Promise(r => setTimeout(r, 50));
+        }
+        assert.equal(job.status, 'done', job.error);
+        assert.equal(job.result.replaced, true);
+        const rendered = job.result.renderedAssetId;
+        assert.equal(stack.fake.assets.get(other.id).isTrashed, true, 'original in trash');
+        assert.equal(stack.fake.stackOf(rendered), null, 'no stack left with only the new photo');
+        const history = stack.fake.metadata.get(rendered).get('editor-photos').edits;
+        assert.equal(history.at(-1).replacedOriginalId, other.id);
+        const { body } = await call(`/api/edit/${rendered}`);
+        assert.equal(body.original.id, rendered, 'the new photo is its own original now');
+    });
+});
