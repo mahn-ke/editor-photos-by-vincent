@@ -572,3 +572,109 @@ a.icon-button {
     color: #c5221f;
     font-size: 13px;
 }
+
+/* ---- Full-screen suggestion preview ---- */
+
+.suggestion-open {
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    cursor: zoom-in;
+}
+
+.suggestion-full {
+    position: fixed;
+    inset: 0;
+    z-index: 120;
+    display: grid;
+    grid-template-rows: auto 1fr auto;
+    background: #000;
+    color: #fff;
+}
+
+.suggestion-full-top {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px var(--gutter);
+    padding-top: max(10px, env(safe-area-inset-top));
+}
+
+.suggestion-full-title {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+.suggestion-full-title span {
+    color: rgb(255 255 255 / 0.7);
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.suggestion-back {
+    font-size: 22px;
+}
+
+.suggestion-full-stage {
+    position: relative;
+    min-height: 0;
+    cursor: pointer;
+    user-select: none;
+    touch-action: none;
+    -webkit-touch-callout: none;
+}
+
+.suggestion-full-stage img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    pointer-events: none;
+}
+
+.suggestion-full-label {
+    position: absolute;
+    left: 50%;
+    bottom: 14px;
+    transform: translateX(-50%);
+    padding: 5px 12px;
+    border-radius: 999px;
+    background: rgb(0 0 0 / 0.55);
+    font-size: 13px;
+    pointer-events: none;
+}
+
+.suggestion-full-bottom {
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    padding: 12px var(--gutter) max(16px, env(safe-area-inset-bottom));
+}
+
+.suggestion-full-bottom .suggestion-actions {
+    justify-content: center;
+    gap: 14px;
+}
+
+.suggestion-full .text-button {
+    color: rgb(255 255 255 / 0.85);
+}
+
+.suggestion-full .text-link {
+    color: #adcbfa;
+}
+
+.suggestion-full .suggestion-error {
+    color: #f28b82;
+}
+
+.suggestion-full .suggestion-error:empty {
+    display: none;
+}

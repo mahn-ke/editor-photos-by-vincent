@@ -201,48 +201,30 @@ async function waitForJob(jobId, onStep) {
     }
 }
 
-function suggestionCard(item) {
-    const card = element('article', 'suggestion-card');
-    const figure = element('div', 'suggestion-figure');
-    const img = element('img');
-    img.alt = `${item.name}: suggested edit`;
-    img.src = `/api/suggestions/${item.id}/after`;
-    img.loading = 'lazy';
-    const compare = element('button', 'compare-button', 'Hold to compare');
-    compare.type = 'button';
-    const showBefore = (on) => {
-        img.src = `/api/suggestions/${item.id}/${on ? 'before' : 'after'}`;
-        compare.textContent = on ? 'Original' : 'Hold to compare';
-    };
-    compare.addEventListener('pointerdown', () => showBefore(true));
-    for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) compare.addEventListener(ev, () => showBefore(false));
-    figure.append(img, compare);
-    const body = element('div', 'suggestion-body');
-    body.append(element('h3', '', item.name), element('p', 'suggestion-why', item.why ? `Why: ${item.why}` : item.summary));
+// The four ways to proceed with a suggestion; shared by the card and the full-screen view.
+// `finish(text)` is called after a save, `removed()` after a dismissal.
+function suggestionActions(item, { finish, removed, status }) {
     const actions = element('div', 'suggestion-actions');
     const apply = element('button', 'button', 'Apply');
+    const replace = element('button', 'text-button', 'Apply & replace');
     const edit = element('a', 'text-link', 'Edit');
     const dismiss = element('button', 'text-button', 'Dismiss');
-    const replace = element('button', 'text-button', 'Apply & replace');
-    replace.type = 'button';
-    replace.title = 'Saves the edit and moves the original to Immich\'s trash';
     apply.type = 'button';
+    replace.type = 'button';
     dismiss.type = 'button';
+    replace.title = 'Saves the edit and moves the original to Immich\'s trash';
     edit.href = `/edit/${item.assetId}?suggestion=${item.id}`;
+    const buttons = [apply, replace, dismiss];
     const run = async (withReplace) => {
-        apply.disabled = true;
-        dismiss.disabled = true;
-        replace.disabled = true;
+        buttons.forEach(b => { b.disabled = true; });
         try {
             const { jobId } = await postJson(`/api/suggestions/${item.id}/apply`, { replace: withReplace });
             await waitForJob(jobId, step => { apply.textContent = `${step}…`; });
-            actions.replaceChildren(element('span', 'suggestion-done', withReplace ? 'Saved; the original is in the trash' : 'Saved as a new version'));
+            finish(withReplace ? 'Saved; the original is in the trash' : 'Saved as a new version');
         } catch (error) {
-            apply.disabled = false;
-            dismiss.disabled = false;
-            replace.disabled = false;
+            buttons.forEach(b => { b.disabled = false; });
             apply.textContent = 'Apply';
-            body.append(element('p', 'suggestion-error', error.message));
+            status(error.message);
         }
     };
     apply.addEventListener('click', () => run(false));
@@ -255,13 +237,114 @@ function suggestionCard(item) {
     });
     dismiss.addEventListener('click', async () => {
         await postJson(`/api/suggestions/${item.id}/dismiss`).catch(() => {});
-        card.remove();
-        if (!document.querySelector('.suggestion-card')) document.querySelector('.greeting')?.remove();
+        removed();
     });
     actions.append(apply, replace, edit, dismiss);
-    body.append(actions);
+    return actions;
+}
+
+// Press-and-hold on `target` shows the original in `img`, releasing shows the edit again
+function holdToCompare(target, img, item, onChange = () => {}) {
+    const show = (before) => {
+        img.src = `/api/suggestions/${item.id}/${before ? 'before' : 'after'}`;
+        onChange(before);
+    };
+    target.addEventListener('pointerdown', (event) => {
+        if (event.button !== 0) return;
+        event.preventDefault();
+        show(true);
+    });
+    for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) target.addEventListener(ev, () => show(false));
+    target.addEventListener('contextmenu', event => event.preventDefault());
+}
+
+function suggestionCard(item) {
+    const card = element('article', 'suggestion-card');
+    const figure = element('div', 'suggestion-figure');
+    const img = element('img');
+    img.alt = `${item.name}: suggested edit`;
+    img.src = `/api/suggestions/${item.id}/after`;
+    img.loading = 'lazy';
+    const open = element('button', 'suggestion-open');
+    open.type = 'button';
+    open.setAttribute('aria-label', `Show ${item.name} full screen`);
+    open.append(img);
+    open.addEventListener('click', () => openSuggestion(item, card));
+    const compare = element('button', 'compare-button', 'Hold to compare');
+    compare.type = 'button';
+    holdToCompare(compare, img, item, before => { compare.textContent = before ? 'Original' : 'Hold to compare'; });
+    figure.append(open, compare);
+    const body = element('div', 'suggestion-body');
+    body.append(element('h3', '', item.name), element('p', 'suggestion-why', item.why ? `Why: ${item.why}` : item.summary));
+    const removed = () => {
+        card.remove();
+        if (!document.querySelector('.suggestion-card')) document.querySelector('.greeting')?.remove();
+    };
+    card.finish = (text) => card.querySelector('.suggestion-actions')?.replaceChildren(element('span', 'suggestion-done', text));
+    card.removed = removed;
+    body.append(suggestionActions(item, {
+        finish: card.finish,
+        removed,
+        status: message => body.append(element('p', 'suggestion-error', message)),
+    }));
     card.append(figure, body);
     return card;
+}
+
+// Full-screen preview: hold the left button (or a finger) to see the original
+function openSuggestion(item, card) {
+    const overlay = element('div', 'suggestion-full');
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', `${item.name}: suggested edit`);
+    const back = element('button', 'icon-button suggestion-back', '←');
+    back.type = 'button';
+    back.setAttribute('aria-label', 'Back');
+    const title = element('div', 'suggestion-full-title');
+    title.append(element('strong', '', item.name), element('span', '', item.why ? `Why: ${item.why}` : item.summary));
+    const top = element('div', 'suggestion-full-top');
+    top.append(back, title);
+    const stageEl = element('div', 'suggestion-full-stage');
+    const img = element('img');
+    img.alt = `${item.name}: suggested edit`;
+    img.src = `/api/suggestions/${item.id}/after`;
+    img.draggable = false;
+    new Image().src = `/api/suggestions/${item.id}/before`; // preload for an instant swap
+    const label = element('span', 'suggestion-full-label', 'Edited · hold to see the original');
+    holdToCompare(stageEl, img, item, before => { label.textContent = before ? 'Original' : 'Edited · hold to see the original'; });
+    stageEl.append(img, label);
+    const statusEl = element('p', 'suggestion-error');
+    const close = () => {
+        overlay.remove();
+        document.body.classList.remove('viewer-open');
+        document.removeEventListener('keydown', onKey);
+        if (history.state?.suggestion === item.id) history.back();
+    };
+    const onKey = (event) => {
+        if (event.key === 'Escape') close();
+    };
+    const bottom = element('div', 'suggestion-full-bottom');
+    bottom.append(suggestionActions(item, {
+        finish: (text) => { card.finish(text); close(); },
+        removed: () => { card.removed(); close(); },
+        status: message => { statusEl.textContent = message; },
+    }), statusEl);
+    back.addEventListener('click', close);
+    document.addEventListener('keydown', onKey);
+    overlay.append(top, stageEl, bottom);
+    document.body.append(overlay);
+    document.body.classList.add('viewer-open');
+    history.pushState({ suggestion: item.id }, '', `#suggestion=${item.id}`);
+    const onPop = () => {
+        if (history.state?.suggestion !== item.id && overlay.isConnected) {
+            overlay.remove();
+            document.body.classList.remove('viewer-open');
+            document.removeEventListener('keydown', onKey);
+        }
+        window.removeEventListener('popstate', onPop);
+    };
+    window.addEventListener('popstate', onPop);
+    back.focus();
 }
 
 async function loadGreeting() {
@@ -281,7 +364,7 @@ async function loadGreeting() {
 }
 
 async function init() {
-    if (location.hash.startsWith('#asset=')) history.replaceState(null, '', location.pathname);
+    if (location.hash.startsWith('#asset=') || location.hash.startsWith('#suggestion=')) history.replaceState(null, '', location.pathname);
     loadGreeting();
     try {
         const buckets = await getJson('/api/timeline/buckets');
