@@ -3,6 +3,7 @@ import { aspectValue, constrainRect, cropToPixels, defaultRect, fitsInside, maxR
 import { FILTERS } from './filters.js';
 import { autoRecipes } from './auto.js';
 import { SKY_LOOKS } from './tools.js';
+import { renderAdvancedPanel } from './advanced-panel.js';
 
 const $ = id => document.getElementById(id);
 const assetId = $('editor').dataset.asset;
@@ -786,7 +787,10 @@ canvas.addEventListener('click', (event) => {
     requestRender();
 });
 
-const PANELS = { suggestions: renderSuggestionsPanel, crop: renderCropPanel, tools: renderToolsPanel, adjust: renderAdjustPanel, filters: renderFiltersPanel };
+const PANELS = {
+    suggestions: renderSuggestionsPanel, crop: renderCropPanel, tools: renderToolsPanel, adjust: renderAdjustPanel, filters: renderFiltersPanel,
+    advanced: () => renderAdvancedPanel($('panel-advanced'), state.recipe, requestRender),
+};
 
 function selectTab(tab) {
     const leavingCrop = state.tab === 'crop' && tab !== 'crop';

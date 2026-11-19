@@ -479,3 +479,38 @@ input[type=range]:focus-visible { outline: 2px solid var(--accent); outline-offs
     background: #fff6d6;
     box-shadow: 0 0 18px 6px rgb(255 240 200 / 0.6);
 }
+
+/* ---- Advanced ---- */
+
+.adv-section { border-bottom: 1px solid #2e2f33; padding: 6px 0 10px; }
+.adv-section summary { cursor: pointer; padding: 8px 0; font-size: 14px; font-weight: 600; list-style-position: inside; }
+.adv-section[open] summary { color: var(--accent); }
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 10px; }
+
+.chip {
+    border: 1px solid #5f6368;
+    border-radius: 999px;
+    padding: 4px 12px;
+    background: transparent;
+    color: var(--text);
+    font: inherit;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.chip.selected { border-color: var(--accent); color: var(--accent); }
+.hue-chip { width: 26px; height: 26px; border: 0; border-radius: 50%; cursor: pointer; outline: 2px solid transparent; outline-offset: 2px; }
+.hue-chip.selected { outline-color: var(--accent); }
+.curve-canvas { width: 100%; aspect-ratio: 1; border-radius: 10px; background: #141417; touch-action: none; cursor: crosshair; }
+.adv-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.adv-reset { margin-top: 14px; }
+
+input[type=range].hue-track::-webkit-slider-runnable-track {
+    background: linear-gradient(to right, hsl(0 80% 55%), hsl(60 80% 55%), hsl(120 80% 55%), hsl(180 80% 55%), hsl(240 80% 55%), hsl(300 80% 55%), hsl(360 80% 55%));
+}
+
+input[type=range].hue-track::-moz-range-track {
+    background: linear-gradient(to right, hsl(0 80% 55%), hsl(60 80% 55%), hsl(120 80% 55%), hsl(180 80% 55%), hsl(240 80% 55%), hsl(300 80% 55%), hsl(360 80% 55%));
+}
+
+.editor-tabs [role=tab] span { white-space: nowrap; }

@@ -97,6 +97,8 @@ export function createGrader({ modelDir, log = console }) {
             natural: prompt('natural'),
             exposure: prompt('exposure'),
             level: prompt('level'),
+            screen: PROMPTS.screen ? prompt('screen') : 0,
+            night: PROMPTS.night ? prompt('night') : 0,
         };
     }
 

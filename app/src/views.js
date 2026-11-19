@@ -12,6 +12,7 @@ const ICONS = {
     tab_crop: html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 15h2V7a2 2 0 0 0-2-2H9v2h8ZM7 17V1H5v4H1v2h4v10a2 2 0 0 0 2 2h10v4h2v-4h4v-2Z"/></svg>`,
     tab_tools: html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.67 18.17-5.3-5.3h-.99l-2.54 2.54v.99l5.3 5.3a1 1 0 0 0 1.41 0l2.12-2.12a1 1 0 0 0 0-1.41ZM17.34 10.19l1.41-1.41 2.12 2.12a3 3 0 0 0 0-4.24l-3.54-3.54-1.41 1.41V1.71l-.7-.71-3.54 3.54.71.71h2.83l-1.41 1.41 1.06 1.06-2.89 2.89-4.13-4.13V5.06L4.83 2.04 2 4.87 5.03 7.9h1.41l4.13 4.13-.85.85H7.6l-5.3 5.3a1 1 0 0 0 0 1.41l2.12 2.12a1 1 0 0 0 1.41 0l5.3-5.3v-2.12l5.15-5.15Z"/></svg>`,
     tab_adjust: html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17v2h6v-2Zm0-12v2h10V5Zm10 16v-2h8v-2h-8v-2h-2v6Zm-6-12v2H3v2h4v2h2V9Zm14 4v-2H11v2Zm-6-4h2V7h4V5h-4V3h-2Z"/></svg>`,
+    tab_advanced: html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 20h18v-2H3Zm1-4 4.5-6 3.5 4.5 2.5-3L19 16Zm-1-9h4V5H3Zm7 0h11V5H10Z"/></svg>`,
     tab_filters: html`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2Zm0 16H5V5h14Zm-6.5-8.5L9 15l-2-2.5L4.5 17h15Z"/></svg>`,
 };
 
@@ -72,7 +73,7 @@ export function appPage({ name }) {
     });
 }
 
-const TABS = [['suggestions', 'Suggestions'], ['crop', 'Crop'], ['tools', 'Tools'], ['adjust', 'Adjust'], ['filters', 'Filters']];
+const TABS = [['suggestions', 'Suggestions'], ['crop', 'Crop'], ['tools', 'Tools'], ['adjust', 'Adjust'], ['filters', 'Filters'], ['advanced', 'Advanced']];
 
 export function editorPage({ assetId }) {
     return '<!doctype html>' + toString(html`<html lang="en">

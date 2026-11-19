@@ -14,7 +14,9 @@ import { LEARNED_PRESETS, STRAIGHTEN } from '../public/edit/learned-presets.js';
 import { applyTone, fromRGB, render, resize, toRGB8 } from '../public/edit/pipeline.js';
 import { ADJUST_KEYS, describeRecipe, normalizeRecipe } from '../public/edit/recipe.js';
 import { EDITS_KEY, RENDER_KEY } from './edits.js';
-import { featuresOf, REWARDS } from './learn.js';
+import { FEATURES, featuresOf, REWARDS } from './learn.js';
+
+const FEATURES_NIGHT = FEATURES.indexOf('night');
 import { pairKey } from './raw-pairs.js';
 
 const WINDOWS = [
@@ -28,6 +30,7 @@ export function armPriors() {
     const priors = Object.fromEntries(LEARNED_PRESETS.map(p => [p.id, p.share]));
     priors.enhance = 0.2;
     priors.dynamic = 0.1;
+    priors.neon = 0.08;
     priors.straighten = STRAIGHTEN.share;
     for (const p of LEARNED_PRESETS) priors[`straighten+${p.id}`] = Math.min(p.share, STRAIGHTEN.share);
     return priors;
@@ -81,12 +84,14 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
         await sharp(Buffer.from(toRGB8(img).buffer), { raw: { width: img.width, height: img.height, channels: 3 } }).jpeg({ quality: 85 }).toFile(file);
     }
 
-    function candidateRecipes(stats, tilt, userId, x) {
+    function candidateRecipes(stats, tilt, userId, x, base = {}) {
         const offsets = learner.strengthOffsets(userId, x);
         const list = [];
         const autos = autoRecipes(stats);
         list.push({ arm: 'enhance', name: 'Enhance', recipe: { adjust: autos.enhance.adjust } });
         list.push({ arm: 'dynamic', name: 'Dynamic', recipe: { adjust: autos.dynamic.adjust } });
+        // Neon night: teal shadows, magenta highlights, deep blues (offered for city/night scenes)
+        if ((x[FEATURES_NIGHT] ?? 0) || (base.night ?? 0) > 0.5 || stats.p50 < 0.3) list.push({ arm: 'neon', name: 'Neon night', recipe: { filter: { id: 'neon', strength: 1 } } });
         for (const p of LEARNED_PRESETS) {
             const adjust = mergeAdjust(p.recipe.adjust, Object.fromEntries(Object.entries(offsets).filter(([k]) => k in (p.recipe.adjust ?? {}))));
             list.push({ arm: p.id, name: p.name, recipe: { adjust, filter: p.recipe.filter ?? { id: 'none', strength: 1 } }, mono: p.recipe.adjust.saturation === -1 || FILTERS[p.recipe.filter?.id]?.mono });
@@ -105,6 +110,8 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
         if (/\.dng$/i.test(asset.originalFileName ?? '') && pairKey(asset.originalFileName)?.part === 'raw') return skip('raw-half');
         const meta = await immich.metadata(auth, assetId);
         if (meta[RENDER_KEY] || meta[EDITS_KEY]) return skip('already-edited');
+        // Screenshots and photos of screens aren't worth suggesting edits for
+        if (/^(screenshot|screen_?shot|scr_)/i.test(asset.originalFileName ?? '') || (/png$/i.test(asset.originalMimeType ?? '') && !asset.exifInfo?.make)) return skip('screenshot');
 
         const full = await loadPreview(auth, assetId);
         const scale = Math.min(1, WORK_SIZE / Math.max(full.width, full.height));
@@ -112,11 +119,12 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
         const stats = measure(work);
         const tilt = detectTilt(full);
         const base = await grader.score(work);
+        if (base.screen > 0.6) return skip('screen');
         const x = featuresOf({ stats, base, tilt });
 
         // 1. Looks on the photo as it is
         const looks = [];
-        for (const c of candidateRecipes(stats, tilt, userId, x)) {
+        for (const c of candidateRecipes(stats, tilt, userId, x, base)) {
             const img = applyTone({ ...work, data: Float32Array.from(work.data) }, c.recipe);
             const s = await grader.score(img);
             const verdict = grader.judge(base, s, { mono: c.mono });

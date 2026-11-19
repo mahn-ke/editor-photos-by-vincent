@@ -156,3 +156,25 @@ test('no slider combination produces invalid pixels', () => {
         }
     }
 });
+
+test('advanced adjustments: identity, exposure, curves, HSL and grading', async () => {
+    const { curveLut, normalizeAdvanced } = await import('../public/edit/advanced.js');
+    const img = chart();
+    const same = render(img, { advanced: normalizeAdvanced({}) });
+    assert.ok(same.data.every((v, i) => Math.abs(v - img.data[i]) < 1e-5), 'defaults change nothing');
+    const lut = curveLut([[0.25, 0.15], [0.75, 0.85]]);
+    assert.ok(lut[256] < 0.2 && lut[768] > 0.8 && lut[0] === 0 && lut[1024] === 1, 'S-curve passes through its points');
+    for (let k = 1; k <= 1024; k++) assert.ok(lut[k] >= lut[k - 1] - 1e-6, 'monotone');
+    const brighter = render(img, { advanced: { exposure: 1 } });
+    assert.ok(meanLuma(brighter) > meanLuma(img) + 0.05);
+    const j = (40 * 64 + 20) * 3; // blue patch
+    const blueSat = render(img, { advanced: { hsl: { blue: { s: -1 } } } });
+    const chroma = (d, k) => Math.max(d[k], d[k + 1], d[k + 2]) - Math.min(d[k], d[k + 1], d[k + 2]);
+    assert.ok(chroma(blueSat.data, j) < chroma(img.data, j) * 0.5, 'blue band desaturated');
+    const graded = render(img, { advanced: { grading: { shadows: { hue: 180, sat: 1 } } } });
+    const dark = (5 * 64 + 4) * 3;
+    assert.ok(graded.data[dark + 2] > img.data[dark + 2] && graded.data[dark] < img.data[dark] + 1e-6, 'teal shadows');
+    for (const adv of [{ dehaze: 1 }, { dehaze: -1 }, { clarity: 1 }, { sharpen: { amount: 1 } }, { noise: 1 }, { grain: 1 }, { vignette: { amount: -1 } }, { levels: { inBlack: 0.5, inWhite: 0.5 } }]) {
+        assert.ok(!render(img, { advanced: adv }).data.some(Number.isNaN), JSON.stringify(adv));
+    }
+});

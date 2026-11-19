@@ -2,6 +2,7 @@
 // Its authorize URL points straight back at the redirect URI, as if the identity
 // provider had signed the user in without a prompt. Used by the tests and `npm run dev:fake`.
 import http from 'node:http';
+import sharp from 'sharp';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 export const FAKE_USER = { id: '6b1c7a52-3f0e-4c2a-9d51-2f6e8a0c4b17', name: 'Test User', email: 'test.user@example.com' };
@@ -336,13 +337,15 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
                 return res.end();
             }
             const svg = placeholderSvg(asset, size);
+            // Previews as PNG (browsers can't decode SVG in workers), like Immich's JPEGs
+            const body = size === 'preview' ? await sharp(Buffer.from(svg)).png().toBuffer() : svg;
             res.writeHead(200, {
-                'content-type': 'image/svg+xml',
-                'content-length': Buffer.byteLength(svg),
+                'content-type': size === 'preview' ? 'image/png' : 'image/svg+xml',
+                'content-length': Buffer.byteLength(body),
                 'cache-control': 'private, max-age=86400, no-transform',
                 etag,
             });
-            return res.end(svg);
+            return res.end(body);
         }
 
         send(404, { message: 'Not found' });

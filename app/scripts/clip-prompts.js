@@ -14,6 +14,8 @@ export const PROMPT_PAIRS = {
     natural: ['A photo with natural colors.', 'A photo with oversaturated, unnatural colors.'],
     exposure: ['A well exposed photo.', 'An overexposed or underexposed photo.'],
     level: ['A photo with a perfectly level horizon.', 'A crooked, tilted photo.'],
+    screen: ['A photo of a computer screen, monitor, TV or phone display.', 'A photo of a real-world scene.'],
+    night: ['A photo of a city at night with neon lights.', 'A photo taken in daylight.'],
 };
 
 async function download(name, dir) {

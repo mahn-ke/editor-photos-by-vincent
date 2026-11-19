@@ -3,6 +3,8 @@
 
 export const RECIPE_VERSION = 1;
 
+import { defaultAdvanced, isAdvancedIdentity, normalizeAdvanced } from './advanced.js';
+
 // Same order and ranges as Google Photos' Adjust panel
 export const ADJUST_KEYS = [
     'hdr', 'brightness', 'contrast', 'whitePoint', 'highlights', 'shadows', 'blackPoint',
@@ -40,6 +42,7 @@ export function defaultRecipe() {
         geometry: { rotate90: 0, angle: 0, aspect: 'free', crop: null },
         adjust: Object.fromEntries(ADJUST_KEYS.map(key => [key, 0])),
         filter: { id: 'none', strength: 1 },
+        advanced: defaultAdvanced(),
         tools: {
             sky: { palette: 'vivid', strength: 0 },
             colorFocus: { strength: 0 },
@@ -84,6 +87,7 @@ export function normalizeRecipe(input = {}) {
             strength: round(clamp(num(r.filter?.strength, 1), 0, 1), 2),
         },
         tools: structuredClone(base.tools),
+        advanced: normalizeAdvanced(r.advanced),
     };
     for (const key of ADJUST_KEYS) {
         const min = UNIPOLAR.has(key) ? 0 : -1;
@@ -118,7 +122,8 @@ export function isIdentity(recipe) {
         && ADJUST_KEYS.every(key => r.adjust[key] === 0)
         && (r.filter.id === 'none' || r.filter.strength === 0)
         && r.tools.sky.strength === 0 && r.tools.colorFocus.strength === 0
-        && r.tools.portraitLight.strength === 0 && r.tools.blur.strength === 0;
+        && r.tools.portraitLight.strength === 0 && r.tools.blur.strength === 0
+        && isAdvancedIdentity(r.advanced);
 }
 
 export function recipesEqual(a, b) {
@@ -141,5 +146,6 @@ export function describeRecipe(recipe, filterNames = {}) {
     if (r.tools.colorFocus.strength) parts.push('Color focus');
     if (r.tools.portraitLight.strength) parts.push('Portrait light');
     if (r.tools.blur.strength) parts.push('Blur');
+    if (!isAdvancedIdentity(r.advanced)) parts.push('Advanced');
     return parts.join(', ') || 'No changes';
 }

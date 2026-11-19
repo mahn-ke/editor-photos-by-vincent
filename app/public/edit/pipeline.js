@@ -6,6 +6,7 @@ import { ADJUST_KEYS, normalizeRecipe } from './recipe.js';
 import { outputMapping, outputSize } from './geometry.js';
 import { FILTERS } from './filters.js';
 import './learned-presets.js';
+import { applyClarityDehaze, applyColour, applyExposure, applyFinish, applyLevelsCurves } from './advanced.js';
 
 // Strength constants, tuned against Google Photos renders by the calibration harness
 export const CAL = {
@@ -286,6 +287,10 @@ export function applyTone(img, recipe, { masks = null, tools = null } = {}) {
         }
     }
 
+    const adv = recipe.advanced;
+    const helpers = { blurChannel, luminance };
+    if (adv) applyExposure(img, adv);
+
     // 2. Local tone: shadows, highlights and HDR against a smooth luminance base
     const needsBase = adjust.shadows || adjust.highlights || adjust.hdr;
     if (needsBase) {
@@ -315,6 +320,8 @@ export function applyTone(img, recipe, { masks = null, tools = null } = {}) {
             data[j + 2] *= k;
         }
     }
+
+    if (adv) applyClarityDehaze(img, adv, helpers);
 
     // 3. Global tone curve
     const toneActive = adjust.brightness || adjust.contrast || adjust.whitePoint || adjust.blackPoint;
@@ -390,6 +397,11 @@ export function applyTone(img, recipe, { masks = null, tools = null } = {}) {
         }
     }
 
+    if (adv) {
+        applyLevelsCurves(img, adv);
+        applyColour(img, adv);
+    }
+
     // 6. Tools that need masks (sky, colour focus, portrait light, blur)
     if (tools) tools(img, recipe, masks);
 
@@ -411,6 +423,8 @@ export function applyTone(img, recipe, { masks = null, tools = null } = {}) {
             }
         }
     }
+
+    if (adv) applyFinish(img, adv, helpers);
 
     for (let j = 0; j < data.length; j++) {
         const v = data[j];

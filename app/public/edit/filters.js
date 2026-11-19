@@ -14,6 +14,7 @@ export const FILTERS = {
     punch: { name: 'Punch', adjust: { contrast: 0.3, pop: 0.35, saturation: 0.15, blackPoint: 0.15 } },
     teal: { name: 'Teal & Orange', adjust: { contrast: 0.15, saturation: 0.1 }, split: { shadows: [-0.03, 0.01, 0.035], highlights: [0.04, 0.015, -0.03], amount: 1 } },
     dusk: { name: 'Dusk', adjust: { warmth: 0.15, tint: 0.2, shadows: -0.1, saturation: 0.1 }, split: { shadows: [0.01, -0.01, 0.04], highlights: [0.04, 0.01, 0], amount: 1 } },
+    neon: { name: 'Neon night', adjust: { contrast: 0.35, saturation: 0.35, blueTone: 0.45, blackPoint: 0.15, warmth: -0.3, tint: 0.2, pop: 0.25, highlights: -0.15 }, split: { shadows: [-0.03, 0.02, 0.07], highlights: [0.08, -0.03, 0.07], amount: 1 } },
     mono: { name: 'Mono', mono: true, adjust: { contrast: 0.1 } },
     'mono-contrast': { name: 'Mono High Contrast', mono: true, adjust: { contrast: 0.45, blackPoint: 0.25, pop: 0.2 } },
     'mono-soft': { name: 'Mono Soft', mono: true, adjust: { contrast: -0.1, blackPoint: -0.25, highlights: -0.15 } },
