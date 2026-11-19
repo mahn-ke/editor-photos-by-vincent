@@ -55,7 +55,13 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
             PRIMARY KEY (user_id, asset_id)
         );
     `);
+    try {
+        db.exec('ALTER TABLE suggestions ADD COLUMN embedding TEXT');
+    } catch {
+        // column exists already
+    }
     const q = {
+        setEmbedding: db.prepare('UPDATE suggestions SET embedding = ? WHERE id = ?'),
         processed: db.prepare('SELECT 1 FROM suggestion_assets WHERE user_id = ? AND asset_id = ?'),
         markProcessed: db.prepare('INSERT OR REPLACE INTO suggestion_assets (user_id, asset_id, processed_at, outcome) VALUES (?, ?, ?, ?)'),
         insert: db.prepare(`INSERT INTO suggestions (id, user_id, asset_id, uploaded_at, computed_at, status, arm, name, recipe, why, gain, features, scores, rank)
@@ -164,7 +170,10 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
         for (const c of keep) {
             const id = randomUUID();
             const why = explain(c, byArm[c.arm], tilt);
-            q.insert.run(id, userId, assetId, uploadedAt, now(), c.arm, c.name, JSON.stringify(c.recipe), why, c.gain, JSON.stringify(x), JSON.stringify({ candidate: c.scores, base }), i++);
+            const { embedding: _a, ...candidateScores } = c.scores;
+            const { embedding, ...baseScores } = base;
+            q.insert.run(id, userId, assetId, uploadedAt, now(), c.arm, c.name, JSON.stringify(c.recipe), why, c.gain, JSON.stringify(x), JSON.stringify({ candidate: candidateScores, base: baseScores }), i++);
+            if (embedding) q.setEmbedding.run(JSON.stringify(embedding), id);
             const previewSize = Math.min(1, 1024 / Math.max(full.width, full.height));
             const before = resize(full, Math.round(full.width * previewSize), Math.round(full.height * previewSize));
             await writeJpeg(before, previewFile(id, 'before'));
@@ -186,14 +195,29 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
 
     // ---- Greeting ----
 
-    // The smallest window with at least 4 photos to suggest for (else the widest that has any)
+    // One suggestion per subject: photos whose CLIP embeddings are very close (the same dish,
+    // building, view…) form a group; only its best candidate is shown. "Best" weighs how much
+    // the edit improves the photo and how interesting the photo is in the first place, so a
+    // good edit of a mundane shot loses to a good edit of a striking one.
+    function bestPerSubject(rows) {
+        const candidates = rows.map((row) => {
+            const scores = JSON.parse(row.scores ?? '{}');
+            const appeal = (scores.base?.aesthetic ?? 5) - 5;
+            return { row, embedding: row.embedding ? JSON.parse(row.embedding) : null, value: row.gain + 0.35 * appeal };
+        }).sort((a, b) => b.value - a.value);
+        const kept = [];
+        for (const c of candidates) {
+            const sameSubject = kept.some(k => k.row.asset_id === c.row.asset_id
+                || (k.embedding && c.embedding && k.embedding.reduce((s, v, i) => s + v * c.embedding[i], 0) > 0.88));
+            if (!sameSubject) kept.push(c);
+        }
+        return new Map(kept.map(k => [k.row.asset_id, k.row]));
+    }
+
+    // The smallest window with at least 4 subjects to suggest for (else the widest that has any)
     function greeting(userId) {
         const t = now();
-        const windows = WINDOWS.map(([ms, label]) => {
-            const perAsset = new Map();
-            for (const row of q.ready.all(userId, t - ms)) if (!perAsset.has(row.asset_id)) perAsset.set(row.asset_id, row);
-            return { perAsset, label };
-        });
+        const windows = WINDOWS.map(([ms, label]) => ({ perAsset: bestPerSubject(q.ready.all(userId, t - ms)), label }));
         const wanted = Math.min(4, windows.at(-1).perAsset.size);
         const chosen = wanted ? windows.find(w => w.perAsset.size >= wanted) : null;
         if (!chosen) return { window: null, text: null, suggestions: [] };

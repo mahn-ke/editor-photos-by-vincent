@@ -14,7 +14,7 @@
 ```
 Error: page.goto: Protocol error (Page.navigate): Cannot navigate to invalid URL
 Call log:
-  - navigating to "/edit/undefined?tab=adjust", waiting until "load"
+  - navigating to "/edit/4399fed3-3367-4b6e-bcfc-d2f37638152a?tab=adjust", waiting until "load"
 
 ```
 

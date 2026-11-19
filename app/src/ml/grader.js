@@ -104,7 +104,9 @@ export function createGrader({ modelDir, log = console }) {
 
     async function score(img) {
         const embeddings = await embed(img);
-        return { ...scoreEmbeddings(embeddings), ...pixelStats(img) };
+        // Mean image embedding (rounded): lets the suggester group photos of the same subject
+        const mean = normalise(embeddings[0].map((_, i) => embeddings.reduce((s, e) => s + e[i], 0) / embeddings.length));
+        return { ...scoreEmbeddings(embeddings), ...pixelStats(img), embedding: mean.map(v => Math.round(v * 1000) / 1000) };
     }
 
     // Decides whether `candidate` (a score) improves on `original`
