@@ -45,15 +45,16 @@ export function fromRGB(buffer, width, height, maxValue = 255) {
 // Ordered 4×4 dither keeps smooth skies free of banding when going back to 8 bits
 const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(v => (v + 0.5) / 16 - 0.5);
 
+// Rounds exactly like toRGB8 (the saved file), so the preview shows the same pixels
 export function toRGBA8(img, out = new Uint8ClampedArray(img.width * img.height * 4)) {
     const { width, data } = img;
     for (let p = 0, j = 0, i = 0; j < data.length; p++, j += 3, i += 4) {
         const x = p % width;
         const y = (p - x) / width;
         const dither = BAYER[(y & 3) * 4 + (x & 3)];
-        out[i] = data[j] * 255 + dither + 0.5;
-        out[i + 1] = data[j + 1] * 255 + dither + 0.5;
-        out[i + 2] = data[j + 2] * 255 + dither + 0.5;
+        out[i] = Math.round(data[j] * 255 + dither);
+        out[i + 1] = Math.round(data[j + 1] * 255 + dither);
+        out[i + 2] = Math.round(data[j + 2] * 255 + dither);
         out[i + 3] = 255;
     }
     return out;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { constrainRect, defaultRect, fitsInside, maxRectAt, outputMapping, outputSize } from '../public/edit/geometry.js';
-import { applyTone, createImage, luminance, render } from '../public/edit/pipeline.js';
+import { applyTone, createImage, luminance, render, toRGB8, toRGBA8 } from '../public/edit/pipeline.js';
 import { defaultRecipe, describeRecipe, isIdentity, normalizeRecipe } from '../public/edit/recipe.js';
 
 function chart(width = 64, height = 48) {
@@ -176,5 +176,15 @@ test('advanced adjustments: identity, exposure, curves, HSL and grading', async 
     assert.ok(graded.data[dark + 2] > img.data[dark + 2] && graded.data[dark] < img.data[dark] + 1e-6, 'teal shadows');
     for (const adv of [{ dehaze: 1 }, { dehaze: -1 }, { clarity: 1 }, { sharpen: { amount: 1 } }, { noise: 1 }, { grain: 1 }, { vignette: { amount: -1 } }, { levels: { inBlack: 0.5, inWhite: 0.5 } }]) {
         assert.ok(!render(img, { advanced: adv }).data.some(Number.isNaN), JSON.stringify(adv));
+    }
+});
+
+test('the preview shows exactly the pixels that get saved', () => {
+    const img = createImage(37, 11);
+    for (let i = 0; i < img.data.length; i++) img.data[i] = ((i * 7919) % 1000) / 999;
+    const saved = toRGB8(img);
+    const shown = toRGBA8(img);
+    for (let p = 0; p < 37 * 11; p++) {
+        for (let c = 0; c < 3; c++) assert.equal(shown[p * 4 + c], saved[p * 3 + c], `pixel ${p} channel ${c}`);
     }
 });
