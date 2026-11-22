@@ -403,15 +403,134 @@ function openSuggestion(item, card) {
     back.focus();
 }
 
+// Asks before the cleanup trashes anything: every photo without a suggestion, red with an ✕.
+// Tapping a photo keeps it (and tapping again marks it for the trash again).
+// Resolves to the ids to trash, or null when cancelled.
+function confirmCleanup(assetIds) {
+    return new Promise((resolve) => {
+        const dialog = element('dialog', 'replace-dialog');
+        dialog.setAttribute('aria-labelledby', 'cleanup-dialog-title');
+        const title = element('h2', '', 'Trash these photos?');
+        title.id = 'cleanup-dialog-title';
+        const grid = element('ul', 'replace-grid');
+        const marked = new Set(assetIds);
+        const confirm = element('button', 'button danger');
+        const update = () => {
+            confirm.textContent = `Trash ${marked.size}`;
+            confirm.disabled = marked.size === 0;
+        };
+        for (const id of assetIds) {
+            const li = element('li', 'replace-tile trash');
+            const button = element('button', 'replace-toggle');
+            button.type = 'button';
+            button.setAttribute('aria-pressed', 'true');
+            const img = element('img');
+            img.src = `/media/${id}/thumbnail`;
+            img.alt = 'Moves to the trash; tap to keep';
+            img.loading = 'lazy';
+            const badge = element('span', 'replace-badge');
+            badge.innerHTML = BADGE_ICONS.trash;
+            button.append(img, badge);
+            button.addEventListener('click', () => {
+                const trash = !marked.has(id);
+                if (trash) marked.add(id);
+                else marked.delete(id);
+                li.classList.toggle('trash', trash);
+                li.classList.toggle('keep', !trash);
+                button.setAttribute('aria-pressed', String(trash));
+                img.alt = trash ? 'Moves to the trash; tap to keep' : 'Stays; tap to trash';
+                update();
+            });
+            li.append(button);
+            grid.append(li);
+        }
+        const n = assetIds.length;
+        const text = element('p', 'replace-text', `${n === 1 ? 'This photo' : `These ${n} photos`} didn't get an edit suggestion. The red ones move to Immich's trash (with a RAW twin), which deletes them for good after 30 days; until then you can restore them. Tap a photo to keep it.`);
+        const actions = element('div', 'replace-actions');
+        const cancel = element('button', 'text-button', 'Cancel');
+        cancel.type = 'button';
+        confirm.type = 'button';
+        update();
+        actions.append(cancel, confirm);
+        dialog.append(title, grid, text, actions);
+        let result = null;
+        cancel.addEventListener('click', () => dialog.close());
+        confirm.addEventListener('click', () => { result = assetIds.filter(id => marked.has(id)); dialog.close(); });
+        dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+        dialog.addEventListener('close', () => {
+            dialog.remove();
+            resolve(result);
+        });
+        document.body.append(dialog);
+        dialog.showModal();
+        cancel.focus();
+    });
+}
+
+// The card for photos without a suggestion: "Apply" reviews and trashes them
+function cleanupCard({ count, previewIds }) {
+    const card = element('article', 'suggestion-card cleanup-card');
+    const figure = element('div', 'suggestion-figure cleanup-mosaic');
+    for (const id of previewIds) {
+        const img = element('img');
+        img.src = `/media/${id}/thumbnail`;
+        img.alt = '';
+        img.loading = 'lazy';
+        figure.append(img);
+    }
+    figure.dataset.count = String(previewIds.length);
+    const body = element('div', 'suggestion-body');
+    body.append(
+        element('h3', '', `Delete ${count} photo${count === 1 ? '' : 's'}`),
+        element('p', 'suggestion-why', `Why: no edit improves ${count === 1 ? 'it' : 'them'}, so ${count === 1 ? 'it' : 'they'} may not be worth keeping`),
+    );
+    const removed = () => {
+        card.remove();
+        if (!document.querySelector('.suggestion-card')) document.querySelector('.greeting')?.remove();
+    };
+    const actions = element('div', 'suggestion-actions');
+    const apply = element('button', 'button', 'Apply');
+    const dismiss = element('button', 'text-button', 'Keep all');
+    apply.type = 'button';
+    dismiss.type = 'button';
+    apply.title = 'Shows the photos; the ones you leave marked go to Immich\'s trash';
+    const enable = (on) => [apply, dismiss].forEach(b => { b.disabled = !on; });
+    apply.addEventListener('click', async () => {
+        enable(false);
+        try {
+            const { assetIds } = await getJson('/api/cleanup');
+            if (!assetIds.length) return removed();
+            const trash = await confirmCleanup(assetIds);
+            if (!trash) return enable(true);
+            apply.textContent = 'Moving to the trash…';
+            const result = await postJson('/api/cleanup/apply', { trash });
+            actions.replaceChildren(element('span', 'suggestion-done', `${result.trashed} photo${result.trashed === 1 ? '' : 's'} moved to the trash`));
+        } catch (error) {
+            enable(true);
+            apply.textContent = 'Apply';
+            body.append(element('p', 'suggestion-error', error.message));
+        }
+    });
+    dismiss.addEventListener('click', async () => {
+        await postJson('/api/cleanup/dismiss').catch(() => {});
+        removed();
+    });
+    actions.append(apply, dismiss);
+    body.append(actions);
+    card.append(figure, body);
+    return card;
+}
+
 async function loadGreeting() {
     try {
         const greeting = await getJson('/api/suggestions');
-        if (!greeting.suggestions?.length) return;
+        if (!greeting.suggestions?.length && !greeting.cleanup) return;
         const section = element('section', 'greeting');
         section.setAttribute('aria-label', 'Suggested edits');
-        section.append(element('h2', 'greeting-title', greeting.text));
+        section.append(element('h2', 'greeting-title', greeting.text || 'Based on your recent uploads, here are some suggestions'));
         const row = element('div', 'greeting-cards');
         greeting.suggestions.forEach(item => row.append(suggestionCard(item)));
+        if (greeting.cleanup) row.append(cleanupCard(greeting.cleanup));
         section.append(row);
         timeline.prepend(section);
     } catch {

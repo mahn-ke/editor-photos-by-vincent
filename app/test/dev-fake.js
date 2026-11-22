@@ -39,9 +39,21 @@ async function fakeSuggester(library) {
         });
     }
     const visible = () => [...rows.values()].filter(r => r.status === 'ready');
+    // Photos "without a suggestion": the cleanup card
+    let cleanup = library[1].assets.filter(a => a.isImage).slice(0, 9).map(a => a.id);
     const card = r => ({ id: r.id, assetId: r.asset_id, name: r.name, why: r.why, summary: r.name });
     return {
-        greeting: () => ({ text: 'Based on your uploads in the last 3 days, here are some edits', suggestions: visible().map(card) }),
+        greeting: () => ({
+            text: 'Based on your uploads in the last 3 days, here are some edits', suggestions: visible().map(card),
+            cleanup: cleanup.length ? { count: cleanup.length, previewIds: cleanup.slice(0, 4) } : null,
+        }),
+        cleanupCandidates: async () => cleanup,
+        applyCleanup: async (userId, token, ids) => {
+            const trash = ids.filter(id => cleanup.includes(id));
+            cleanup = [];
+            return { trashed: trash.length, assets: trash.length };
+        },
+        dismissCleanup: () => { cleanup = []; },
         forAsset: (userId, assetId) => visible().filter(r => r.asset_id === assetId).map(card),
         get: (userId, id) => rows.get(id) ?? null,
         preview: (userId, id, which) => rows.get(id)?.[which] ?? null,

@@ -63,6 +63,13 @@ twin of the original) and the new edit (white +). The subject is the user's phot
 works it out after a batch of uploads settles; a suggestion is only shown once its subject is
 known, so the dialog opens instantly.
 
+Photos that get no suggestion (no edit improves them, or they show a screen) are offered for
+deletion instead, as one **Delete N photos** card next to the edit suggestions. Its **Apply** opens
+the same dialog with all of them marked red with ✕; tap a photo to keep it. The rest go to Immich's
+trash (with a RAW twin stacked under them). **Keep all** and photos you untick are not offered again;
+photos you edit, trash elsewhere or trash through another suggestion drop out. Screenshots, videos and
+edits are never offered.
+
 With `RAW_EDITS=1` edits render from a Pixel photo's RAW twin when its camera look can be matched,
 taking the camera JPEG's fine detail (the phone's burst merge and deblur, which the DNG lacks), and
 Apply keeps the RAW as the original (with the edit history and the fitted look) with the camera
@@ -83,6 +90,20 @@ the JPEG shown. The menu can unstack them or stop all background work. See
 
 Models (≈330 MB, all permissively licensed, pinned by sha256) are downloaded into
 `MODEL_DIR` on first use.
+
+## Notifications
+
+Once a batch of uploads has been worked through (no new-asset or suggestion jobs left, subjects
+prepared), the app sends one push notification through Gotify at
+[notifications.by.vincent.mahn.ke](https://notifications.by.vincent.mahn.ke): "X new photo suggestions -
+Tap to open and review!", where X counts the new cards (one per subject, plus one for the cleanup card
+when it has new photos). Tapping it opens the app. Each suggestion is announced once; a failed send is
+retried after the next poll. Suggestions prepared from the web app's own "prepare" button are not
+announced.
+
+Set up: create an application (e.g. "editor.photos") in Gotify and store its token as the repository
+secret `GOTIFY_TOKEN`; the deploy passes it to the container. Without it notifications are off. All
+users' notifications go to that one application.
 
 ## Mobile API (for the Immich app fork)
 
@@ -110,6 +131,8 @@ Immich token (`Authorization: Bearer`, validated against Immich): `GET /api/mobi
 | `CACHE_DIR` | `$DATA_DIR` |
 | `MODEL_DIR` | `$CACHE_DIR/models` |
 | `APP_SECRET` | key for the stored API keys (default: generated `data/master.key`) |
+| `GOTIFY_URL` | `https://notifications.by.vincent.mahn.ke` |
+| `GOTIFY_TOKEN` | Gotify application token for push notifications (empty: off) |
 
 ## Development
 

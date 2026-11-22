@@ -9,6 +9,7 @@ import { createLearner } from './src/learn.js';
 import { createGrader } from './src/ml/grader.js';
 import { createMasker } from './src/ml/masks.js';
 import { createMaskStore } from './src/mask-store.js';
+import { createAnnouncer, createNotifier } from './src/notify.js';
 import { createRawService } from './src/raw-service.js';
 import { createApp } from './src/server.js';
 import { armPriors, createSuggester } from './src/suggest.js';
@@ -41,6 +42,11 @@ const editor = createEditor({
         if (event.type === 'version-discarded') suggester.discardedVersion(event.userId, event.originalId, event);
     },
 });
+const announce = createAnnouncer({
+    suggester,
+    notifier: createNotifier({ url: config.gotifyUrl, token: config.gotifyToken }),
+    baseUrl: config.baseUrl,
+});
 const background = createBackground({
     db: store.db, immich, config,
     masterKey: loadMasterKey({ secret: config.appSecret, dataDir: config.dataDir }),
@@ -55,8 +61,10 @@ const background = createBackground({
             if (outcome !== 'done-before') background.enqueue(userId, 'subjects', '', 60000);
             return outcome;
         },
+        // …and once the whole batch is through, announce the new suggestions (push notification)
         subjects: async (userId, auth) => {
             await suggester.prepareSubjects(userId, auth);
+            await announce(userId, background.status(userId).pending);
             return 'ok';
         },
         // Fill the greeting with the last 4 weeks of uploads (up to 60 photos)

@@ -26,6 +26,9 @@ const WINDOWS = [
 const WORK_SIZE = 768;
 const SUBJECT_HOURS = 3;
 const KEEP = 2;
+// Photos that got no suggestion and are offered for deletion instead. Screenshots, videos,
+// edits and RAW halves (they go with their JPEG's stack) are never offered.
+const CLEANUP_OUTCOMES = new Set(['no-improvement', 'screen']);
 
 export function armPriors() {
     const priors = Object.fromEntries(LEARNED_PRESETS.map(p => [p.id, p.share]));
@@ -59,10 +62,17 @@ export function createSuggester({ db, immich, grader, learner, dataDir, rawServi
             user_id TEXT NOT NULL, asset_id TEXT NOT NULL, processed_at INTEGER NOT NULL, outcome TEXT,
             PRIMARY KEY (user_id, asset_id)
         );
+        CREATE TABLE IF NOT EXISTS cleanup_candidates (
+            user_id TEXT NOT NULL, asset_id TEXT NOT NULL, added_at INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'ready', notified_at INTEGER,
+            PRIMARY KEY (user_id, asset_id)
+        );
     `);
-    for (const column of ['embedding TEXT', 'taken_at INTEGER', 'subject TEXT', 'subject_at INTEGER']) {
+    for (const column of ['embedding TEXT', 'taken_at INTEGER', 'subject TEXT', 'subject_at INTEGER', 'notified_at INTEGER']) {
         try {
             db.exec(`ALTER TABLE suggestions ADD COLUMN ${column}`);
+            // Suggestions from before notifications existed don't announce themselves
+            if (column.startsWith('notified_at')) db.exec('UPDATE suggestions SET notified_at = computed_at');
         } catch {
             // column exists already
         }
@@ -89,6 +99,13 @@ export function createSuggester({ db, immich, grader, learner, dataDir, rawServi
         shown: db.prepare('UPDATE suggestions SET shown_at = ? WHERE id = ? AND shown_at IS NULL'),
         stale: db.prepare("SELECT * FROM suggestions WHERE status = 'ready' AND shown_at IS NOT NULL AND shown_at < ?"),
         forAsset: db.prepare("SELECT * FROM suggestions WHERE user_id = ? AND asset_id = ? AND status IN ('ready', 'applying')"),
+        unnotified: db.prepare("SELECT * FROM suggestions WHERE user_id = ? AND status = 'ready' AND subject_at IS NOT NULL AND notified_at IS NULL"),
+        setNotified: db.prepare('UPDATE suggestions SET notified_at = ? WHERE id = ?'),
+        addCleanup: db.prepare("INSERT OR IGNORE INTO cleanup_candidates (user_id, asset_id, added_at) VALUES (?, ?, ?)"),
+        cleanupReady: db.prepare("SELECT asset_id FROM cleanup_candidates WHERE user_id = ? AND status = 'ready' ORDER BY added_at DESC, asset_id"),
+        cleanupUnnotified: db.prepare("SELECT asset_id FROM cleanup_candidates WHERE user_id = ? AND status = 'ready' AND notified_at IS NULL"),
+        cleanupNotified: db.prepare('UPDATE cleanup_candidates SET notified_at = ? WHERE user_id = ? AND asset_id = ?'),
+        cleanupStatus: db.prepare("UPDATE cleanup_candidates SET status = ? WHERE user_id = ? AND asset_id = ? AND status = 'ready'"),
     };
     const previewDir = path.join(dataDir === ':memory:' ? path.join(process.cwd(), 'data') : dataDir, 'suggestions');
     mkdirSync(previewDir, { recursive: true });
@@ -126,6 +143,8 @@ export function createSuggester({ db, immich, grader, learner, dataDir, rawServi
         const asset = await immich.asset(auth, assetId);
         const skip = (outcome) => {
             q.markProcessed.run(userId, assetId, now(), outcome);
+            // A photo nothing could improve (or a photo of a screen) is offered for deletion
+            if (CLEANUP_OUTCOMES.has(outcome)) q.addCleanup.run(userId, assetId, new Date(asset.createdAt ?? asset.fileCreatedAt).getTime() || now());
             return outcome;
         };
         if (asset.type !== 'IMAGE' || asset.isTrashed) return skip('not-a-photo');
@@ -246,7 +265,8 @@ export function createSuggester({ db, immich, grader, learner, dataDir, rawServi
         const windows = WINDOWS.map(([ms, label]) => ({ perAsset: bestPerSubject(q.shownReady.all(userId, t - ms)), label }));
         const wanted = Math.min(4, windows.at(-1).perAsset.size);
         const chosen = wanted ? windows.find(w => w.perAsset.size >= wanted) : null;
-        if (!chosen) return { window: null, text: null, suggestions: [] };
+        const cleanup = cleanupSummary(userId);
+        if (!chosen) return { window: null, text: null, suggestions: [], cleanup };
         const items = [...chosen.perAsset.values()].slice(0, 5);
         for (const row of items) q.shown.run(t, row.id);
         return {
@@ -256,7 +276,79 @@ export function createSuggester({ db, immich, grader, learner, dataDir, rawServi
                 id: row.id, assetId: row.asset_id, name: row.name, why: row.why,
                 summary: describeRecipe(JSON.parse(row.recipe)), recipe: JSON.parse(row.recipe),
             })),
+            cleanup,
         };
+    }
+
+    // ---- Cleanup: photos without a suggestion, offered for deletion as one card ----
+
+    function cleanupSummary(userId) {
+        const ids = q.cleanupReady.all(userId).map(r => r.asset_id);
+        return ids.length ? { count: ids.length, previewIds: ids.slice(0, 4) } : null;
+    }
+
+    // The candidates still in the library (not trashed or deleted since); the rest drop out
+    async function cleanupCandidates(userId, auth) {
+        const ids = q.cleanupReady.all(userId).map(r => r.asset_id);
+        const present = await Promise.all(ids.map(id => immich.asset(auth, id).then(a => !a.isTrashed, () => false)));
+        ids.forEach((id, i) => { if (!present[i]) q.cleanupStatus.run('gone', userId, id); });
+        return ids.filter((_, i) => present[i]);
+    }
+
+    // Moves the confirmed candidates to Immich's trash (with the rest of their stack: a RAW
+    // twin); candidates the user unticked are kept and not offered again. A candidate whose
+    // stack holds an edit (made after it was offered) is kept as well.
+    async function applyCleanup(userId, auth, trashIds) {
+        const asked = new Set(trashIds);
+        const targets = new Set();
+        const trashed = [];
+        for (const { asset_id: id } of q.cleanupReady.all(userId)) {
+            if (!asked.has(id)) {
+                q.cleanupStatus.run('kept', userId, id);
+                continue;
+            }
+            const asset = await immich.asset(auth, id).catch(() => null);
+            if (!asset || asset.isTrashed) {
+                q.cleanupStatus.run('gone', userId, id);
+                continue;
+            }
+            const members = asset.stack?.id ? await stackMembers(auth, asset.stack.id) : [];
+            const others = members.filter(m => m !== id);
+            const metas = await Promise.all(others.map(m => immich.metadata(auth, m).catch(() => ({}))));
+            if (metas.some(meta => meta[RENDER_KEY] || meta[EDITS_KEY])) {
+                q.cleanupStatus.run('kept', userId, id);
+                continue;
+            }
+            targets.add(id);
+            for (const m of others) targets.add(m);
+            trashed.push(id);
+        }
+        if (targets.size) await immich.trash(auth, [...targets]);
+        for (const id of trashed) q.cleanupStatus.run('trashed', userId, id);
+        retire(userId, [...targets]);
+        return { trashed: trashed.length, assets: targets.size };
+    }
+
+    function dismissCleanup(userId) {
+        for (const { asset_id: id } of q.cleanupReady.all(userId)) q.cleanupStatus.run('kept', userId, id);
+    }
+
+    // ---- Notifications ----
+
+    // What is new since the last notification: one per subject card, plus one for the cleanup
+    // card if it has new photos. `markNotified(pending)` once the notification went out.
+    function pendingNotification(userId) {
+        const rows = q.unnotified.all(userId);
+        const recent = rows.filter(r => r.uploaded_at >= now() - WINDOWS.at(-1)[0]);
+        const cleanupIds = q.cleanupUnnotified.all(userId).map(r => r.asset_id);
+        const count = bestPerSubject(recent).size + (cleanupIds.length ? 1 : 0);
+        return { count, suggestionIds: rows.map(r => r.id), cleanupIds };
+    }
+
+    function markNotified(userId, { suggestionIds, cleanupIds }) {
+        const t = now();
+        for (const id of suggestionIds) q.setNotified.run(t, id);
+        for (const id of cleanupIds) q.cleanupNotified.run(t, userId, id);
     }
 
     // The subject of a suggestion: every other photo that shows the same thing — the user's
@@ -388,7 +480,10 @@ export function createSuggester({ db, immich, grader, learner, dataDir, rawServi
 
     // Photos that went to the trash: their suggestions are no longer offered
     function retire(userId, assetIds) {
-        for (const assetId of assetIds) for (const row of q.forAsset.all(userId, assetId)) if (row.status === 'ready') q.setStatus.run('superseded', row.id);
+        for (const assetId of assetIds) {
+            for (const row of q.forAsset.all(userId, assetId)) if (row.status === 'ready') q.setStatus.run('superseded', row.id);
+            q.cleanupStatus.run('gone', userId, assetId);
+        }
     }
 
     function preview(userId, id, which) {
@@ -430,6 +525,7 @@ export function createSuggester({ db, immich, grader, learner, dataDir, rawServi
 
     // Your own edit of a photo we had suggestions for (or not): which arms were close?
     function manualEdit(userId, assetId, recipe) {
+        q.cleanupStatus.run('kept', userId, assetId); // edited: worth keeping after all
         const rows = q.forAsset.all(userId, assetId);
         const final = normalizeRecipe(recipe);
         for (const row of rows) {
@@ -466,5 +562,9 @@ export function createSuggester({ db, immich, grader, learner, dataDir, rawServi
             .map(row => ({ id: row.id, assetId: row.asset_id, name: row.name, why: row.why, recipe: JSON.parse(row.recipe), summary: describeRecipe(JSON.parse(row.recipe)) }));
     }
 
-    return { process, greeting, subject, storedSubject, prepareSubjects, retire, preview, get, forAsset, dismiss, accepted, manualEdit, discardedVersion, expire, forget, setStatus: (id, s) => q.setStatus.run(s, id) };
+    return {
+        process, greeting, subject, storedSubject, prepareSubjects, retire, preview, get, forAsset, dismiss, accepted, manualEdit, discardedVersion, expire, forget,
+        cleanupCandidates, applyCleanup, dismissCleanup, pendingNotification, markNotified,
+        setStatus: (id, s) => q.setStatus.run(s, id),
+    };
 }

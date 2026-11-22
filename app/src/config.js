@@ -14,6 +14,9 @@ export function loadConfig(env = process.env) {
         // Render edits from a Pixel photo's RAW twin and keep the RAW (not the camera JPEG) when
         // applying a suggestion. Off until the RAW render matches the camera's detail (docs/raw.md)
         rawEdits: env.RAW_EDITS === '1',
+        // Push notifications when new suggestions are ready (Gotify application token)
+        gotifyUrl: (env.GOTIFY_URL || 'https://notifications.by.vincent.mahn.ke').replace(/\/+$/, ''),
+        gotifyToken: env.GOTIFY_TOKEN || '',
         modelDir: env.MODEL_DIR || path.join(env.CACHE_DIR || env.DATA_DIR || path.join(process.cwd(), 'data'), 'models'),
     };
 }

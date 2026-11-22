@@ -349,6 +349,25 @@ export function createApp({ config, store, immich, editor = null, background = n
         res.json({ ok: true });
     });
 
+    // The cleanup card: new photos that got no suggestion, offered for deletion. "Apply" shows
+    // them all (still in the library) and trashes the ones the user leaves ticked; only
+    // candidates the server offered are accepted.
+    app.get('/api/cleanup', requireSession, asUser(async (req, res) => {
+        if (!suggester) return res.json({ assetIds: [] });
+        res.json({ assetIds: await suggester.cleanupCandidates(req.session.userId, req.session.token) });
+    }));
+
+    app.post('/api/cleanup/apply', requireSession, jsonBody, asUser(async (req, res) => {
+        if (!suggester) return res.status(503).json({ error: 'unavailable' });
+        const ids = Array.isArray(req.body?.trash) ? req.body.trash.filter(id => typeof id === 'string' && UUID.test(id)) : [];
+        res.json(await suggester.applyCleanup(req.session.userId, req.session.token, ids));
+    }));
+
+    app.post('/api/cleanup/dismiss', requireSession, (req, res) => {
+        suggester?.dismissCleanup(req.session.userId);
+        res.json({ ok: true });
+    });
+
     // Prepares suggestions for recent uploads right away, with the signed-in session
     // (the background job does the same continuously once its API key exists)
     const preparing = new Map();
@@ -381,6 +400,8 @@ export function createApp({ config, store, immich, editor = null, background = n
                     state.done++;
                 }
                 await suggester.prepareSubjects(userId, token).catch(error => log.warn(`Subjects failed: ${error.message}`));
+                // Asked for while looking at the app: no push notification for these
+                suggester.markNotified(userId, suggester.pendingNotification(userId));
             } finally {
                 state.running = false;
             }
