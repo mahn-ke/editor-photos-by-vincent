@@ -18,6 +18,8 @@ services:
       # state, suggestions) stays backed up.
       - CACHE_DIR=/app/cache
       - MODEL_DIR=/app/cache/models
+      # Render edits from the RAW twin and keep the RAW instead of the camera JPEG (docs/raw.md)
+      # - RAW_EDITS=1
     volumes:
       - data:/app/data
       - /app/cache

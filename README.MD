@@ -63,6 +63,11 @@ twin of the original) and the new edit (white +). The subject is the user's phot
 works it out after a batch of uploads settles; a suggestion is only shown once its subject is
 known, so the dialog opens instantly.
 
+With `RAW_EDITS=1` edits render from a Pixel photo's RAW twin when its camera look can be matched,
+and Apply keeps the RAW (with the edit history and the fitted look) instead of the camera JPEG,
+which goes to the trash. Off by default: colours match, fine detail does not yet — see
+[docs/raw.md](docs/raw.md).
+
 ## Suggestions and background work
 
 At sign-in the app creates a limited Immich API key (stored encrypted) and, on HTTPS, an

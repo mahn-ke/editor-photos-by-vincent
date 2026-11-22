@@ -43,7 +43,7 @@ function mergeAdjust(...parts) {
     return out;
 }
 
-export function createSuggester({ db, immich, grader, learner, dataDir, log = console, now = Date.now }) {
+export function createSuggester({ db, immich, grader, learner, dataDir, rawService = null, log = console, now = Date.now }) {
     db.exec(`
         CREATE TABLE IF NOT EXISTS suggestions (
             id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, uploaded_at INTEGER NOT NULL,
@@ -288,9 +288,15 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
         const chosen = await immich.asset(auth, row.asset_id);
         const takenAt = new Date(chosen.fileCreatedAt).getTime();
         const embedding = row.embedding ? JSON.parse(row.embedding) : await embeddingOf(userId, auth, row.asset_id).catch(() => null);
-        const ids = [];
-        const seen = new Set([row.asset_id]);
-        // The suggestion's own stack: RAW twins and other non-edits go, earlier edits stay
+        // A well-matched RAW twin is kept as the original instead of the camera JPEG
+        const raw = rawService ? await rawService.sourceFor(auth, chosen).catch((error) => {
+            log.warn(`RAW match for ${row.asset_id} failed: ${error.message}`);
+            return null;
+        }) : null;
+        const keep = raw?.rawId ?? row.asset_id;
+        const ids = keep === row.asset_id ? [] : [row.asset_id];
+        const seen = new Set([row.asset_id, keep]);
+        // The suggestion's own stack: other non-edits (a RAW twin not kept) go, earlier edits stay
         if (chosen.stack?.id) {
             for (const id of await stackMembers(auth, chosen.stack.id)) {
                 if (seen.has(id)) continue;
@@ -300,7 +306,7 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
                 ids.push(id);
             }
         }
-        if (!embedding) return { ids, takenAt };
+        if (!embedding) return { ids, keep, takenAt };
         const candidates = new Set(q.ready.all(userId, now() - WINDOWS.at(-1)[0]).map(r => r.asset_id));
         if (Number.isFinite(takenAt)) {
             for (let page = 1; page && page <= 5; ) {
@@ -338,16 +344,16 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
                 ids.push(id);
             }
         }
-        log.info?.(`Subject of ${row.asset_id}: ${scores.join(', ') || 'no candidates'}`);
-        return { ids, takenAt };
+        log.info?.(`Subject of ${row.asset_id}${keep !== row.asset_id ? ' (keeps the RAW)' : ''}: ${scores.join(', ') || 'no candidates'}`);
+        return { ids, keep, takenAt };
     }
 
     async function prepareSubject(userId, auth, id) {
         const row = q.get.get(id, userId);
         if (!row) return [];
-        const { ids, takenAt } = await computeSubject(userId, auth, row);
-        q.setSubject.run(JSON.stringify(ids), now(), Number.isFinite(takenAt) ? takenAt : null, row.id);
-        return ids;
+        const { ids, keep, takenAt } = await computeSubject(userId, auth, row);
+        q.setSubject.run(JSON.stringify({ ids, keep }), now(), Number.isFinite(takenAt) ? takenAt : null, row.id);
+        return { ids, keep };
     }
 
     // Background step: subjects of all suggestions not shown yet (or touched by new photos)
@@ -360,17 +366,21 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
         return done;
     }
 
-    // The stored subject; computed now if the background has not got to it
+    // The stored subject { keep, ids }: `keep` is the photo that stays as the original (the
+    // suggestion's photo or its RAW twin), `ids` go to the trash; computed now if the
+    // background has not got to it
     async function subject(userId, auth, id) {
         const row = q.get.get(id, userId);
-        if (!row) return [];
+        if (!row) return { keep: null, ids: [] };
         if (row.subject_at === null || row.subject_at === undefined) return prepareSubject(userId, auth, id);
         return storedSubject(userId, id);
     }
 
     function storedSubject(userId, id) {
         const row = q.get.get(id, userId);
-        return row?.subject ? JSON.parse(row.subject) : [];
+        if (!row?.subject) return { keep: row?.asset_id ?? null, ids: [] };
+        const value = JSON.parse(row.subject);
+        return Array.isArray(value) ? { keep: row.asset_id, ids: value } : value;
     }
 
     // Photos that went to the trash: their suggestions are no longer offered

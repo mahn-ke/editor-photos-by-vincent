@@ -320,9 +320,9 @@ export function createApp({ config, store, immich, editor = null, background = n
     app.get('/api/suggestions/:id/subject', requireSession, asUser(async (req, res) => {
         const row = suggester?.get(req.session.userId, req.params.id);
         if (!row) return res.status(404).json({ error: 'not_found' });
-        const ids = await suggester.subject(req.session.userId, req.session.token, row.id);
+        const { keep, ids } = await suggester.subject(req.session.userId, req.session.token, row.id);
         const present = await Promise.all(ids.map(id => immich.asset(req.session.token, id).then(a => !a.isTrashed, () => false)));
-        res.json({ assetId: row.asset_id, others: ids.filter((_, i) => present[i]) });
+        res.json({ assetId: keep ?? row.asset_id, keepsRaw: Boolean(keep && keep !== row.asset_id), others: ids.filter((_, i) => present[i]) });
     }));
 
     // `trashSubject`: the photos of the same subject the user confirmed to trash; only ids
@@ -332,10 +332,10 @@ export function createApp({ config, store, immich, editor = null, background = n
         if (!row || row.status !== 'ready') return res.status(404).json({ error: 'not_found' });
         const userId = req.session.userId;
         const asked = Array.isArray(req.body?.trashSubject) ? new Set(req.body.trashSubject.filter(id => typeof id === 'string')) : new Set();
-        const trash = asked.size ? suggester.storedSubject(userId, row.id).filter(id => asked.has(id)) : [];
+        const trash = asked.size ? suggester.storedSubject(userId, row.id).ids.filter(id => asked.has(id)) : [];
         suggester.setStatus(row.id, 'applying');
         const job = editor.startSave({
-            token: req.session.token, userId, originalId: row.asset_id, recipe: row.recipe, source: 'suggestion', trash,
+            token: req.session.token, userId, originalId: row.asset_id, recipe: row.recipe, source: 'suggestion', trash, keepRaw: true,
             onDone: (result) => {
                 suggester.accepted(userId, row.id, row.recipe);
                 if (result?.trashed?.length) suggester.retire(userId, result.trashed);
@@ -457,6 +457,15 @@ export function createApp({ config, store, immich, editor = null, background = n
     }));
 
     // RAW source: develops the paired DNG and fits the JPEG look on first use
+    // The camera look of a RAW kept as the original, for the editor's preview
+    app.get('/api/edit/:id/look.jpg', requireSession, editorRoute(async (req, res) => {
+        const id = assetParam(req, res);
+        if (!id) return;
+        const bytes = await rawService?.preview(req.session.token, id);
+        if (!bytes) return res.status(404).json({ error: 'not_found' });
+        res.set('Cache-Control', 'private, max-age=86400').type('image/jpeg').send(bytes);
+    }));
+
     app.get('/api/edit/:id/raw', requireSession, editorRoute(async (req, res) => {
         const id = assetParam(req, res);
         if (!id) return;

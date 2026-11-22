@@ -8,16 +8,21 @@ import { fromRGB } from '../public/edit/pipeline.js';
 
 export const MASK_KINDS = ['sky', 'subject', 'depth'];
 
-export function createMaskStore({ masker, immich, dataDir, log = console }) {
+// `previewOf(auth, assetId)` may supply the preview bytes (a RAW kept as the original is masked
+// on its camera look, not on Immich's rendering of the whole sensor)
+export function createMaskStore({ masker, immich, dataDir, previewOf = null, log = console }) {
     const dir = path.join(dataDir === ':memory:' ? path.join(process.cwd(), 'data') : dataDir, 'masks');
     mkdirSync(dir, { recursive: true });
     const inflight = new Map();
     const file = (assetId, name) => path.join(dir, `${assetId}-${name}`);
 
     async function build(auth, assetId) {
-        const response = await immich.media(auth, assetId, 'preview');
-        if (!response.ok) throw new Error(`preview ${response.status}`);
-        const bytes = Buffer.from(await response.arrayBuffer());
+        let bytes = previewOf ? await previewOf(auth, assetId) : null;
+        if (!bytes) {
+            const response = await immich.media(auth, assetId, 'preview');
+            if (!response.ok) throw new Error(`preview ${response.status}`);
+            bytes = Buffer.from(await response.arrayBuffer());
+        }
         const { data, info } = await sharp(bytes).autoOrient().removeAlpha().raw().toBuffer({ resolveWithObject: true });
         const masks = await masker.compute(fromRGB(data, info.width, info.height));
         const coverage = {};

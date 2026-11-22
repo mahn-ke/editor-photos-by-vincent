@@ -3,11 +3,12 @@
 //
 // 1. LibRaw (dcraw_emu) → 16-bit linear sRGB with camera white balance
 // 2. Lens shading: the DNG's OpcodeList2 GainMaps, applied per channel
-// 3. Alignment: scale from the image sizes (zoom shots store a crop), translation by
-//    phase correlation on gradient images
-// 4. Fit (at ~256 px): 3×3 colour matrix in linear light, per-channel monotone tone curves
-//    (extrapolated above the JPEG's clipping point), and a 16×12 local luminance gain grid
-// 5. Quality: median colour error; above the limit the editor falls back to the JPEG
+// 3. Lens distortion (OpcodeList3 WarpRectilinear), the camera's local tone map
+//    (ProfileGainTableMap), then the EXIF orientation
+// 4. Alignment: scale search (the JPEG may show less of the scene) plus phase correlation
+// 5. Fit (on an area-averaged ~320 px image): per-channel monotone tone curves (extrapolated
+//    above the JPEG's clipping point), a 3×3 colour matrix and a 16×12×8 local gain grid
+// 6. Quality: median colour error; above the limit the JPEG is used instead
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -24,14 +25,15 @@ export const MAX_DELTA_E = 6;
 // ---- Reading the DNG -------------------------------------------------------------
 
 export async function readTags(file) {
-    const { stdout } = await run(EXIFTOOL, ['-j', '-n', '-b', '-OpcodeList2', '-DefaultCropOrigin', '-DefaultCropSize', '-BaselineExposure', '-ImageWidth', '-ImageHeight', '-Model', file], { maxBuffer: 64 * 1024 * 1024 });
+    const { stdout } = await run(EXIFTOOL, ['-j', '-n', '-b', '-OpcodeList2', '-OpcodeList3', '-ProfileGainTableMap', '-DefaultCropOrigin', '-DefaultCropSize', '-BaselineExposure', '-ImageWidth', '-ImageHeight', '-Model', '-Orientation', file], { maxBuffer: 64 * 1024 * 1024 });
     return JSON.parse(stdout)[0] ?? {};
 }
 
 export async function develop(file) {
     // -4: 16-bit linear, no auto-brightening; -o 1: sRGB primaries; -w: camera WB; -q 3: AHD
     const { stdout } = await run(DCRAW, ['-T', '-4', '-o', '1', '-w', '-q', '3', '-t', '0', '-Z', '-', file], { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024 });
-    const { data, info } = await sharp(stdout).raw({ depth: 'ushort' }).toBuffer({ resolveWithObject: true });
+    // rgb16 keeps all 16 bits; without it sharp reduces the TIFF to 8 bits per channel
+    const { data, info } = await sharp(stdout).toColourspace('rgb16').raw({ depth: 'ushort' }).toBuffer({ resolveWithObject: true });
     const px = new Uint16Array(data.buffer, data.byteOffset, data.byteLength / 2);
     const lin = new Float32Array(info.width * info.height * 3);
     for (let p = 0, j = 0; p < info.width * info.height; p++, j += 3) {
@@ -106,6 +108,164 @@ export function applyGainMaps(img, maps) {
         }
     }
     return img;
+}
+
+// DNG opcode WarpRectilinear (id 1, in OpcodeList3): the lens distortion correction the camera
+// applies (strong on the ultra-wide). Returns per-plane { kr[4], kt[2], cx, cy } (first plane used).
+export function parseWarp(base64) {
+    if (!base64) return null;
+    const buf = Buffer.from(String(base64).replace(/^base64:/, ''), 'base64');
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    let o = 0;
+    const count = view.getUint32(o); o += 4;
+    let warp = null;
+    for (let i = 0; i < count && o + 16 <= buf.length; i++) {
+        const id = view.getUint32(o); o += 12;
+        const size = view.getUint32(o); o += 4;
+        if (id === 1) {
+            let q = o + 4; // planes
+            const d = () => { const v = view.getFloat64(q); q += 8; return v; };
+            const kr = [d(), d(), d(), d()], kt = [d(), d()];
+            // centre follows all planes; with one plane it comes right after
+            const planes = view.getUint32(o);
+            q = o + 4 + planes * 48;
+            warp = { kr, kt, cx: d(), cy: d() };
+        }
+        o += size;
+    }
+    return warp;
+}
+
+// Applies WarpRectilinear: each output pixel samples the source at the distorted position
+export function applyWarp(img, warp) {
+    if (!warp) return img;
+    const { width: w, height: h, data } = img;
+    const cx = warp.cx * (w - 1), cy = warp.cy * (h - 1);
+    const m = Math.max(Math.hypot(cx, cy), Math.hypot(w - 1 - cx, cy), Math.hypot(cx, h - 1 - cy), Math.hypot(w - 1 - cx, h - 1 - cy));
+    const [k0, k1, k2, k3] = warp.kr, [t0, t1] = warp.kt;
+    // Interpolating softens the whole image: skip warps that move no pixel by half a pixel
+    let shift = 0;
+    for (let r = 0; r <= 1.0001; r += 0.05) {
+        const r2 = r * r;
+        shift = Math.max(shift, Math.abs((k0 + r2 * (k1 + r2 * (k2 + r2 * k3)) - 1) * r * m) + (Math.abs(t0) + Math.abs(t1)) * 3 * r2 * m);
+    }
+    if (shift < 0.5) return img;
+    const out = new Float32Array(data.length);
+    for (let y = 0; y < h; y++) {
+        const dy = (y - cy) / m;
+        for (let x = 0; x < w; x++) {
+            const dx = (x - cx) / m;
+            const r2 = dx * dx + dy * dy;
+            const f = k0 + r2 * (k1 + r2 * (k2 + r2 * k3));
+            const sx = cx + m * (f * dx + 2 * t0 * dx * dy + t1 * (r2 + 2 * dx * dx));
+            const sy = cy + m * (f * dy + 2 * t1 * dx * dy + t0 * (r2 + 2 * dy * dy));
+            if (sx < 0 || sy < 0 || sx > w - 1 || sy > h - 1) continue;
+            const x0 = Math.floor(sx), y0 = Math.floor(sy);
+            const x1 = Math.min(w - 1, x0 + 1), y1 = Math.min(h - 1, y0 + 1);
+            const ax = sx - x0, ay = sy - y0;
+            const d = (y * w + x) * 3;
+            for (let c = 0; c < 3; c++) {
+                const a = data[(y0 * w + x0) * 3 + c], b = data[(y0 * w + x1) * 3 + c];
+                const e = data[(y1 * w + x0) * 3 + c], g = data[(y1 * w + x1) * 3 + c];
+                out[d + c] = (a + (b - a) * ax) * (1 - ay) + (e + (g - e) * ax) * ay;
+            }
+        }
+    }
+    return { width: w, height: h, data: out };
+}
+
+// ProfileGainTableMap (DNG 1.6): the camera's local tone mapping. A grid of gain curves over
+// the image (sensor orientation); each pixel's curve is indexed by a weighted mix of
+// R, G, B, min and max. Stored in the file's byte order (little-endian on Pixels).
+export function parseGainTable(base64) {
+    if (!base64) return null;
+    const buf = Buffer.from(String(base64).replace(/^base64:/, ''), 'base64');
+    if (buf.length < 64) return null;
+    const view = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const le = view.getUint32(0, true) < 65536;
+    const u32 = o => view.getUint32(o, le), f64 = o => view.getFloat64(o, le), f32 = o => view.getFloat32(o, le);
+    const pointsV = u32(0), pointsH = u32(4), points = u32(40);
+    if (buf.length < 64 + pointsV * pointsH * points * 4) return null;
+    const gains = new Float32Array(pointsV * pointsH * points);
+    for (let i = 0; i < gains.length; i++) gains[i] = f32(64 + i * 4);
+    return {
+        pointsV, pointsH, spacingV: f64(8), spacingH: f64(16), originV: f64(24), originH: f64(32), points,
+        weights: [0, 1, 2, 3, 4].map(i => f32(44 + i * 4)), gains,
+    };
+}
+
+// Modifies `img` in place
+export function applyGainTable(img, table, { inputScale = 1 } = {}) {
+    if (!table) return img;
+    const { width: w, height: h, data } = img;
+    const { pointsV, pointsH, points, weights: [wr, wg, wb, wmin, wmax], gains } = table;
+    const out = data; // in place: a 12 MP float image is ~150 MB
+    for (let y = 0; y < h; y++) {
+        const gy = Math.min(pointsV - 1, Math.max(0, ((y + 0.5) / h - table.originV) / table.spacingV));
+        const y0 = Math.min(pointsV - 2, Math.floor(gy)), ay = gy - y0;
+        for (let x = 0; x < w; x++) {
+            const gx = Math.min(pointsH - 1, Math.max(0, ((x + 0.5) / w - table.originH) / table.spacingH));
+            const x0 = Math.min(pointsH - 2, Math.floor(gx)), ax = gx - x0;
+            const j = (y * w + x) * 3;
+            const r = data[j], g = data[j + 1], b = data[j + 2];
+            const mix = (wr * r + wg * g + wb * b + wmin * Math.min(r, g, b) + wmax * Math.max(r, g, b)) * inputScale;
+            const t = Math.min(1, Math.max(0, mix)) * (points - 1);
+            const t0 = Math.min(points - 2, Math.floor(t)), at = t - t0;
+            const cell = (yy, xx) => {
+                const o = (yy * pointsH + xx) * points + t0;
+                return gains[o] + (gains[o + 1] - gains[o]) * at;
+            };
+            const top = cell(y0, x0) + (cell(y0, x0 + 1) - cell(y0, x0)) * ax;
+            const bottom = cell(y0 + 1, x0) + (cell(y0 + 1, x0 + 1) - cell(y0 + 1, x0)) * ax;
+            const k = top + (bottom - top) * ay;
+            out[j] = r * k; out[j + 1] = g * k; out[j + 2] = b * k;
+        }
+    }
+    return { width: w, height: h, data: out };
+}
+
+// EXIF orientation of the DNG (sensor data is developed unrotated, -t 0, so the sensor-space
+// gain maps line up): 3 = 180°, 6 = 90° clockwise, 8 = 90° counter-clockwise
+export function orient(img, orientation) {
+    const o = Number(orientation) || 1;
+    if (![3, 6, 8].includes(o)) return img;
+    const { width: w, height: h, data } = img;
+    const ow = o === 3 ? w : h, oh = o === 3 ? h : w;
+    const out = new Float32Array(data.length);
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            let nx, ny;
+            if (o === 3) { nx = w - 1 - x; ny = h - 1 - y; }
+            else if (o === 6) { nx = h - 1 - y; ny = x; }
+            else { nx = y; ny = w - 1 - x; }
+            const s = (y * w + x) * 3, d = (ny * ow + nx) * 3;
+            out[d] = data[s]; out[d + 1] = data[s + 1]; out[d + 2] = data[s + 2];
+        }
+    }
+    return { width: ow, height: oh, data: out };
+}
+
+// Developed, lens-shading corrected and upright linear RGB, ready to align with the JPEG
+export async function prepareSource(file) {
+    const [tags, dev] = await Promise.all([readTags(file), develop(file)]);
+    const shaded = applyGainMaps(dev, parseGainMaps(tags.OpcodeList2));
+    const warped = applyWarp(shaded, parseWarp(tags.OpcodeList3));
+    // The table is indexed by the pixel before baseline exposure (measured: lower error than after)
+    const toned = applyGainTable(warped, parseGainTable(tags.ProfileGainTableMap));
+    return orient(toned, tags.Orientation);
+}
+
+// Crops the developed image to the region that matches the JPEG frame
+export function cropForBaseline(dev, a) {
+    const x0 = Math.max(0, Math.round(a.dx * dev.width));
+    const y0 = Math.max(0, Math.round(a.dy * dev.height));
+    // The JPEG frame covers `scale` of the developed image (less when the camera crops)
+    const w = Math.min(dev.width - x0, Math.round(dev.width * a.scale));
+    const h = Math.min(dev.height - y0, Math.round(dev.height * a.scale));
+    if (x0 === 0 && y0 === 0 && w === dev.width && h === dev.height) return dev;
+    const out = { width: w, height: h, data: new Float32Array(w * h * 3) };
+    for (let y = 0; y < h; y++) out.data.set(dev.data.subarray(((y0 + y) * dev.width + x0) * 3, ((y0 + y) * dev.width + x0 + w) * 3), y * w * 3);
+    return out;
 }
 
 // ---- Alignment ----------------------------------------------------------------------
@@ -216,6 +376,28 @@ function warpInto(dev, scale, offX, offY, w, h) {
         }
     }
     return out;
+}
+
+// Area-average downscale by an integer factor: point samples of a noisy single RAW frame
+// against the camera's denoised multi-frame JPEG would flatten every fitted curve
+function boxShrink(img, k) {
+    if (k <= 1) return img;
+    const w = Math.floor(img.width / k), h = Math.floor(img.height / k);
+    const out = new Float32Array(w * h * 3);
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            let r = 0, g = 0, b = 0;
+            for (let yy = y * k; yy < y * k + k; yy++) {
+                for (let xx = x * k; xx < x * k + k; xx++) {
+                    const j = (yy * img.width + xx) * 3;
+                    r += img.data[j]; g += img.data[j + 1]; b += img.data[j + 2];
+                }
+            }
+            const d = (y * w + x) * 3, n = k * k;
+            out[d] = r / n; out[d + 1] = g / n; out[d + 2] = b / n;
+        }
+    }
+    return { width: w, height: h, data: out };
 }
 
 // ---- Fitting -----------------------------------------------------------------------
@@ -418,8 +600,7 @@ export function fitBaseline(lin, jpeg, w, h) {
                 return ww ? s / ww : (Number.isNaN(v) ? NaN : v);
             });
         }
-        // The bilateral grid still makes matches worse (see docs/raw.md); off unless RAW_LOCAL_GRID is set
-        grid = process.env.RAW_LOCAL_GRID ? next.map(v => (Number.isNaN(v) ? 0 : v)) : new Float32Array(grid.length);
+        grid = next.map(v => (Number.isNaN(v) ? 0 : v));
     }
     const baseline = {
         v: 2, top, curves: curves.map(c => c.map(v => Math.round(v * 10000) / 10000)), matrix: matrix.map(r => r.map(v => Math.round(v * 10000) / 10000)),
@@ -440,9 +621,10 @@ export function fitBaseline(lin, jpeg, w, h) {
 // Linear developed RAW → sRGB-encoded image that matches the camera JPEG. Values above 1
 // are kept (headroom) so the Highlights slider can recover them. `exposure` (EV) acts on
 // the linear data first, like turning exposure up or down in a RAW converter.
-export function applyBaseline(img, baseline, { exposure = 0 } = {}) {
+// `inPlace` writes into `img` (saves a full-size copy when it is not needed any more)
+export function applyBaseline(img, baseline, { exposure = 0, inPlace = false } = {}) {
     const { width, height, data } = img;
-    const out = { width, height, data: new Float32Array(width * height * 3) };
+    const out = inPlace ? img : { width, height, data: new Float32Array(width * height * 3) };
     const { matrix, curves, grid, top } = baseline;
     const knot = knotFn(top);
     const gain = 2 ** exposure;
@@ -466,24 +648,39 @@ export function applyBaseline(img, baseline, { exposure = 0 } = {}) {
 }
 
 // Aligns a developed RAW to the JPEG preview and fits the baseline on ~256 px images
-export async function buildBaseline(dev, jpegPixels, jpegWidth, jpegHeight, log = console) {
+export async function buildBaseline(source, jpegPixels, jpegWidth, jpegHeight, log = console) {
     const W = 320;
     const jw = W;
     const jh = Math.round((jpegHeight / jpegWidth) * W);
     const jpegSmall = await sharp(Buffer.from(jpegPixels.buffer), { raw: { width: jpegWidth, height: jpegHeight, channels: 3 } }).resize(jw, jh).raw().toBuffer();
     const jpeg = Float32Array.from(jpegSmall, v => v / 255);
+    let dev = source;
+    dev = boxShrink(dev, Math.max(1, Math.floor(dev.width / jw)));
     // Zoom shots store a crop: the DNG covers less of the scene than the JPEG frame implies
     const baseScale = dev.width / jw;
+    // Normalise brightness for alignment: night shots are several stops darker than their JPEG
+    const lumAll = luminanceOf(dev.data, dev.width * dev.height);
+    const sample = [];
+    for (let i = 0; i < lumAll.length; i += 97) sample.push(lumAll[i]);
+    sample.sort((a, b) => a - b);
+    const norm = 0.8 / Math.max(1e-4, sample[Math.floor(sample.length * 0.98)]);
     let best = null;
-    for (const s of [1, 0.985, 1.015, 0.97, 1.03]) {
+    const tryScale = (s) => {
         const scale = baseScale * s;
         const offX = (dev.width / scale - jw) / 2;
         const offY = (dev.height / scale - jh) / 2;
         const warped = warpInto(dev, scale, offX, offY, jw, jh);
-        const a = luminanceOf(Float32Array.from(warped, v => Math.min(1, linearToSrgb(v * 2))), jw * jh);
+        const a = luminanceOf(Float32Array.from(warped, v => Math.min(1, linearToSrgb(v * norm))), jw * jh);
         const b = luminanceOf(jpeg, jw * jh);
         const pc = phaseCorrelate(a, b, jw, jh, 512);
-        if (!best || pc.confidence > best.confidence) best = { scale, offX: offX + pc.dx, offY: offY + pc.dy, confidence: pc.confidence };
+        if (!best || pc.confidence > best.confidence) best = { scale, s, offX: offX + pc.dx, offY: offY + pc.dy, confidence: pc.confidence };
+    };
+    // The JPEG may show less of the scene than the RAW (distortion correction, digital crop):
+    // a coarse search over scale, then refinement around the best match
+    for (const s of [1, 0.95, 0.9, 0.85, 0.8, 0.75, 0.7]) tryScale(s);
+    for (const step of [0.02, 0.008, 0.003]) {
+        const centre = best.s;
+        for (const d of [-2, -1, 1, 2]) tryScale(centre + d * step);
     }
     const lin = warpInto(dev, best.scale, best.offX, best.offY, jw, jh);
     const baseline = fitBaseline(lin, jpeg, jw, jh);

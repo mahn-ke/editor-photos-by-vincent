@@ -25,12 +25,16 @@ const immich = createImmichClient({ baseUrl: config.immichUrl });
 const renderPool = createRenderPool();
 const learner = createLearner({ db: store.db, priors: armPriors() });
 const grader = createGrader({ modelDir: config.modelDir });
-const suggester = createSuggester({ db: store.db, immich, grader, learner, dataDir: config.dataDir });
-const maskStore = createMaskStore({ masker: createMasker({ modelDir: config.modelDir }), immich, dataDir: config.cacheDir });
+const rawService = createRawService({ immich, dataDir: config.cacheDir });
+// RAW-first edits are opt-in (RAW_EDITS=1); RAWs already kept as originals always preview correctly
+const rawEdits = config.rawEdits ? rawService : null;
+const suggester = createSuggester({ db: store.db, immich, grader, learner, dataDir: config.dataDir, rawService: rawEdits });
+const maskStore = createMaskStore({ masker: createMasker({ modelDir: config.modelDir }), immich, dataDir: config.cacheDir, previewOf: (auth, id) => rawService.preview(auth, id) });
 const editor = createEditor({
     immich,
     renderPool,
     maskStore,
+    rawService: rawEdits,
     onEvent: (event) => {
         if (!event.userId) return;
         if (event.type === 'manual-edit') suggester.manualEdit(event.userId, event.originalId, event.recipe);
@@ -68,7 +72,6 @@ const background = createBackground({
         },
     },
 });
-const rawService = createRawService({ immich, dataDir: config.cacheDir });
 const app = createApp({ config, store, immich, editor, background, suggester, maskStore, rawService });
 background.start();
 

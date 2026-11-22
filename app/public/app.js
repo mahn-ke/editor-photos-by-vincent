@@ -220,7 +220,7 @@ function suggestionActions(item, { finish, removed, status }) {
         enable(false);
         try {
             const subject = await getJson(`/api/suggestions/${item.id}/subject`);
-            if (subject.others.length && !(await confirmReplace(item, subject))) return enable(true);
+            if ((subject.others.length || subject.keepsRaw) && !(await confirmReplace(item, subject))) return enable(true);
             const { jobId } = await postJson(`/api/suggestions/${item.id}/apply`, { trashSubject: subject.others });
             const job = await waitForJob(jobId, step => { apply.textContent = `${step}…`; });
             const trashed = job.result?.trashed?.length ?? 0;
@@ -248,7 +248,7 @@ const BADGE_ICONS = {
 // Asks before "Apply" trashes anything: shows every photo of the suggestion's subject — the one
 // edited (kept, green), the others (trashed, red) and the new edit (added, white).
 // Resolves to true when the user confirms.
-function confirmReplace(item, { assetId, others }) {
+function confirmReplace(item, { assetId, others, keepsRaw }) {
     return new Promise((resolve) => {
         const dialog = element('dialog', 'replace-dialog');
         dialog.setAttribute('aria-labelledby', 'replace-dialog-title');
@@ -267,12 +267,14 @@ function confirmReplace(item, { assetId, others }) {
             li.append(img, badge);
             return li;
         };
-        grid.append(tile(`/media/${assetId}/thumbnail`, 'used', 'Original: stays, the edit was made from it'));
+        grid.append(tile(`/media/${assetId}/thumbnail`, 'used', keepsRaw ? 'RAW: stays as the original, the edit is made from it' : 'Original: stays, the edit was made from it'));
         for (const id of others) grid.append(tile(`/media/${id}/thumbnail`, 'trash', 'Same subject: moves to the trash'));
         grid.append(tile(`/api/suggestions/${item.id}/after`, 'added', 'New edit: stacked on top as the primary'));
         const n = others.length;
         const text = element('p', 'replace-text');
-        text.textContent = 'The original (green) stays. The edit (white) is stacked on top of it and becomes the photo you see. '
+        text.textContent = (keepsRaw
+            ? 'The RAW (green) stays as the original; the edit (white) is rendered from it, stacked on top and becomes the photo you see. The camera JPEG goes to the trash with the rest. '
+            : 'The original (green) stays. The edit (white) is stacked on top of it and becomes the photo you see. ')
             + `The ${n === 1 ? 'other photo' : `${n} other photos`} of this subject (red) ${n === 1 ? 'moves' : 'move'} to Immich's trash, which deletes ${n === 1 ? 'it' : 'them'} for good after 30 days. Until then you can restore ${n === 1 ? 'it' : 'them'} from the trash.`;
         const actions = element('div', 'replace-actions');
         const cancel = element('button', 'text-button', 'Cancel');

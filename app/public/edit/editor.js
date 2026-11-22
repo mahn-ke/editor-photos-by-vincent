@@ -1028,7 +1028,7 @@ async function start() {
             state.suggestion = await api(`/api/suggestions/${encodeURIComponent(suggestionId)}`).catch(() => null);
             if (state.suggestion?.recipe) state.recipe = normalizeRecipe(state.suggestion.recipe);
         }
-        const loaded = await call('load', { url: `/media/${state.context.original.id}/preview` });
+        const loaded = await call('load', { url: state.context.previewUrl ?? `/media/${state.context.original.id}/preview` });
         state.proxy = { width: loaded.width, height: loaded.height };
         state.stats = loaded.stats;
         statusEl.hidden = true;
