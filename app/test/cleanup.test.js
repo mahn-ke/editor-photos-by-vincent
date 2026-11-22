@@ -4,6 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import sharp from 'sharp';
 import { after, before, test } from 'node:test';
 import { createImmichClient } from '../src/immich.js';
 import { createLearner } from '../src/learn.js';
@@ -27,7 +28,10 @@ before(async () => {
     db = new DatabaseSync(':memory:');
     clock = Date.UTC(2026, 10, 18, 12);
     const learner = createLearner({ db, priors: armPriors(), now: () => clock });
-    suggester = createSuggester({ db, immich: createImmichClient({ baseUrl: fake.url }), grader, learner, dataDir: mkdtempSync(path.join(tmpdir(), 'ep-')), log: silentLog, now: () => clock });
+    // Plain grey previews: no horizon to straighten, whatever fonts the fake draws with
+    const grey = await sharp({ create: { width: 600, height: 400, channels: 3, background: '#808080' } }).jpeg().toBuffer();
+    const immich = { ...createImmichClient({ baseUrl: fake.url }), media: async () => new Response(grey, { headers: { 'content-type': 'image/jpeg' } }) };
+    suggester = createSuggester({ db, immich, grader, learner, dataDir: mkdtempSync(path.join(tmpdir(), 'ep-')), log: silentLog, now: () => clock });
     fake.tokens.add('t');
 });
 after(() => fake.close());
