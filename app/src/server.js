@@ -315,26 +315,21 @@ export function createApp({ config, store, immich, editor = null, background = n
         res.set('Cache-Control', 'private, max-age=86400').type('image/jpeg').send(bytes);
     });
 
-    // The other photos of this suggestion's subject that still exist and belong to the user
+    // The other photos of this suggestion's subject (see suggester.subject)
     app.get('/api/suggestions/:id/subject', requireSession, asUser(async (req, res) => {
         const row = suggester?.get(req.session.userId, req.params.id);
         if (!row) return res.status(404).json({ error: 'not_found' });
-        const others = [];
-        for (const id of suggester.subject(req.session.userId, row.id)) {
-            const asset = await immich.asset(req.session.token, id).catch(() => null);
-            if (asset && !asset.isTrashed && (!asset.ownerId || asset.ownerId === req.session.userId)) others.push(id);
-        }
-        res.json({ assetId: row.asset_id, others });
+        res.json({ assetId: row.asset_id, others: await suggester.subject(req.session.userId, req.session.token, row.id) });
     }));
 
     // `trashSubject`: the photos of the same subject the user confirmed to trash; only ids
-    // that really belong to this suggestion's subject are accepted
+    // the server itself found for this suggestion's subject are accepted
     app.post('/api/suggestions/:id/apply', requireSession, jsonBody, editorRoute(async (req, res) => {
         const row = suggester?.get(req.session.userId, req.params.id);
         if (!row || row.status !== 'ready') return res.status(404).json({ error: 'not_found' });
         const userId = req.session.userId;
         const asked = Array.isArray(req.body?.trashSubject) ? new Set(req.body.trashSubject.filter(id => typeof id === 'string')) : new Set();
-        const trash = asked.size ? suggester.subject(userId, row.id).filter(id => asked.has(id)) : [];
+        const trash = asked.size ? suggester.shownSubject(userId, row.id).filter(id => asked.has(id)) : [];
         suggester.setStatus(row.id, 'applying');
         const job = editor.startSave({
             token: req.session.token, userId, originalId: row.asset_id, recipe: row.recipe, source: 'suggestion', trash,

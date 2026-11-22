@@ -239,7 +239,9 @@ export async function startFakeImmich({ library = generateLibrary(), port = 0 } 
         if (req.method === 'POST' && url.pathname === '/api/search/metadata') {
             const all = [...assets.values()].filter(a => !a.isTrashed)
                 .filter(a => !body.originalFileName || (a.originalFileName ?? '').toLowerCase().includes(body.originalFileName.toLowerCase()))
-                .filter(a => !body.createdAfter || new Date(a.createdAt ?? `${a.fileCreatedAt}Z`) >= new Date(body.createdAfter));
+                .filter(a => !body.createdAfter || new Date(a.createdAt ?? `${a.fileCreatedAt}Z`) >= new Date(body.createdAfter))
+                .filter(a => !body.takenAfter || new Date(`${a.fileCreatedAt}Z`) >= new Date(body.takenAfter))
+                .filter(a => !body.takenBefore || new Date(`${a.fileCreatedAt}Z`) <= new Date(body.takenBefore));
             const size = body.size ?? 250;
             const page = body.page ?? 1;
             const items = all.slice((page - 1) * size, page * size).map(a => ({ ...assetDto(a), ownerId: FAKE_USER.id, stack: undefined }));

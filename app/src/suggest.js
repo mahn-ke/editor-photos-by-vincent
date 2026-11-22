@@ -50,6 +50,10 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
             gain REAL, features TEXT, scores TEXT, shown_at INTEGER, rank INTEGER NOT NULL DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS suggestions_user ON suggestions (user_id, status, uploaded_at);
+        CREATE TABLE IF NOT EXISTS asset_embeddings (
+            user_id TEXT NOT NULL, asset_id TEXT NOT NULL, embedding TEXT NOT NULL,
+            PRIMARY KEY (user_id, asset_id)
+        );
         CREATE TABLE IF NOT EXISTS suggestion_assets (
             user_id TEXT NOT NULL, asset_id TEXT NOT NULL, processed_at INTEGER NOT NULL, outcome TEXT,
             PRIMARY KEY (user_id, asset_id)
@@ -62,6 +66,8 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
     }
     const q = {
         setEmbedding: db.prepare('UPDATE suggestions SET embedding = ? WHERE id = ?'),
+        assetEmbedding: db.prepare('SELECT embedding FROM asset_embeddings WHERE user_id = ? AND asset_id = ?'),
+        saveAssetEmbedding: db.prepare('INSERT OR REPLACE INTO asset_embeddings (user_id, asset_id, embedding) VALUES (?, ?, ?)'),
         processed: db.prepare('SELECT 1 FROM suggestion_assets WHERE user_id = ? AND asset_id = ?'),
         markProcessed: db.prepare('INSERT OR REPLACE INTO suggestion_assets (user_id, asset_id, processed_at, outcome) VALUES (?, ?, ?, ?)'),
         insert: db.prepare(`INSERT INTO suggestions (id, user_id, asset_id, uploaded_at, computed_at, status, arm, name, recipe, why, gain, features, scores, rank)
@@ -125,6 +131,9 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
         const stats = measure(work);
         const tilt = detectTilt(full);
         const base = await grader.score(work);
+        // Every scored photo keeps its embedding, so it can join a subject later even
+        // without a suggestion of its own
+        if (base.embedding) q.saveAssetEmbedding.run(userId, assetId, JSON.stringify(base.embedding));
         if (base.screen > 0.6) return skip('screen');
         const x = featuresOf({ stats, base, tilt });
 
@@ -236,18 +245,68 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
         };
     }
 
-    // The other photos the greeting folded into this suggestion's subject (asset ids, newest
-    // uploads first); photos without an embedding never join a subject
-    function subject(userId, id) {
+    // The other photos of this suggestion's subject: the user's photos taken within a few hours
+    // of it (plus other suggestions from the last weeks) whose CLIP embedding is very close.
+    // Missing embeddings are computed from Immich's preview and kept. Stacks count once,
+    // by their primary; RAW halves and the suggestion's own stack are left out.
+    const SUBJECT_HOURS = 3;
+    const subjects = new Map(); // `${userId}:${suggestionId}` → { ids, at }
+
+    async function embeddingOf(userId, auth, assetId) {
+        const cached = q.assetEmbedding.get(userId, assetId);
+        if (cached) return JSON.parse(cached.embedding);
+        const full = await loadPreview(auth, assetId);
+        const scale = Math.min(1, WORK_SIZE / Math.max(full.width, full.height));
+        const { embedding } = await grader.score(resize(full, Math.round(full.width * scale), Math.round(full.height * scale)));
+        if (!embedding) return null;
+        q.saveAssetEmbedding.run(userId, assetId, JSON.stringify(embedding));
+        return embedding;
+    }
+
+    async function subject(userId, auth, id) {
         const row = q.get.get(id, userId);
-        const embedding = row?.embedding ? JSON.parse(row.embedding) : null;
+        if (!row) return [];
+        const chosen = await immich.asset(auth, row.asset_id);
+        const embedding = row.embedding ? JSON.parse(row.embedding) : await embeddingOf(userId, auth, row.asset_id).catch(() => null);
         if (!embedding) return [];
-        const ids = new Set();
-        for (const other of q.ready.all(userId, now() - WINDOWS.at(-1)[0])) {
-            if (other.asset_id === row.asset_id || !other.embedding) continue;
-            if (similar(embedding, JSON.parse(other.embedding))) ids.add(other.asset_id);
+        const exclude = new Set([row.asset_id]);
+        if (chosen.stack?.id) {
+            const stack = await immich.stack(auth, chosen.stack.id).catch(() => null);
+            for (const a of stack?.assets ?? []) exclude.add(a.id);
         }
-        return [...ids];
+        const takenAt = new Date(chosen.fileCreatedAt).getTime();
+        const candidates = new Set(q.ready.all(userId, now() - WINDOWS.at(-1)[0]).map(r => r.asset_id));
+        if (Number.isFinite(takenAt)) {
+            const { items } = await immich.searchMetadata(auth, {
+                type: 'IMAGE', size: 200, page: 1,
+                takenAfter: new Date(takenAt - SUBJECT_HOURS * 3600e3).toISOString(),
+                takenBefore: new Date(takenAt + SUBJECT_HOURS * 3600e3).toISOString(),
+            });
+            for (const item of items) if (!item.ownerId || item.ownerId === userId) candidates.add(item.id);
+        }
+        const ids = [];
+        for (const assetId of candidates) {
+            if (exclude.has(assetId)) continue;
+            const asset = await immich.asset(auth, assetId).catch(() => null);
+            if (!asset || asset.isTrashed || asset.type !== 'IMAGE') continue;
+            if (asset.ownerId && asset.ownerId !== userId) continue;
+            if (asset.stack?.primaryAssetId && asset.stack.primaryAssetId !== assetId) continue;
+            if (asset.stack?.id && asset.stack.id === chosen.stack?.id) continue;
+            if (/\.dng$/i.test(asset.originalFileName ?? '') && pairKey(asset.originalFileName)?.part === 'raw') continue;
+            const other = await embeddingOf(userId, auth, assetId).catch((error) => {
+                log.warn(`Embedding ${assetId} failed: ${error.message}`);
+                return null;
+            });
+            if (similar(embedding, other)) ids.push(assetId);
+        }
+        subjects.set(`${userId}:${id}`, { ids, at: now() });
+        for (const [key, value] of subjects) if (now() - value.at > 3600e3) subjects.delete(key);
+        return ids;
+    }
+
+    // The subject last shown for this suggestion (what "Apply & replace" may trash)
+    function shownSubject(userId, id) {
+        return subjects.get(`${userId}:${id}`)?.ids ?? [];
     }
 
     // Photos that went to the trash: their suggestions are no longer offered
@@ -330,5 +389,5 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
             .map(row => ({ id: row.id, assetId: row.asset_id, name: row.name, why: row.why, recipe: JSON.parse(row.recipe), summary: describeRecipe(JSON.parse(row.recipe)) }));
     }
 
-    return { process, greeting, subject, retire, preview, get, forAsset, dismiss, accepted, manualEdit, discardedVersion, expire, forget, setStatus: (id, s) => q.setStatus.run(s, id) };
+    return { process, greeting, subject, shownSubject, retire, preview, get, forAsset, dismiss, accepted, manualEdit, discardedVersion, expire, forget, setStatus: (id, s) => q.setStatus.run(s, id) };
 }

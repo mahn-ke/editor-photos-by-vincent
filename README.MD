@@ -55,7 +55,7 @@ Immich's trash). Leaving with unsaved changes asks "Discard changes?". **Save & 
 the stack and goes to Immich's trash (30 days), and the edit history moves to the new photo.
 
 **Apply & replace** on a suggestion card works per subject instead: a dialog shows every photo
-the suggestion grouped into its subject (similar CLIP embeddings) — the edited photo (green ✓),
+of the suggestion's subject (photos taken within 3 hours of it, or other open suggestions, with a very close CLIP embedding; one per stack, RAW halves excluded) — the edited photo (green ✓),
 the other photos (red ✕) and the new edit (white +). On confirming, the original stays, the
 edit is stacked on top as the new primary, and the other photos (with their stacks, e.g. a
 RAW twin) go to Immich's trash, which deletes them after 30 days.
