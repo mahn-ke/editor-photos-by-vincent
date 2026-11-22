@@ -47,6 +47,9 @@ async function fakeSuggester(library) {
         preview: (userId, id, which) => rows.get(id)?.[which] ?? null,
         setStatus: (id, status) => { if (rows.has(id)) rows.get(id).status = status; },
         accepted: (userId, id) => { if (rows.has(id)) rows.get(id).status = 'applied'; },
+        // Pretend the next few photos of the library show the same subject
+        subject: (userId, id) => (rows.has(id) ? library[0].assets.filter(a => a.isImage).slice(3 + Number(id.slice(1)) * 3, 6 + Number(id.slice(1)) * 3).map(a => a.id) : []),
+        retire: () => {},
         dismiss: (userId, id) => (rows.has(id) ? (rows.get(id).status = 'dismissed') : false),
     };
 }

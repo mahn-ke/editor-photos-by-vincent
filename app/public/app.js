@@ -212,28 +212,36 @@ function suggestionActions(item, { finish, removed, status }) {
     apply.type = 'button';
     replace.type = 'button';
     dismiss.type = 'button';
-    replace.title = 'Saves the edit and moves the original to Immich\'s trash';
+    replace.title = 'Saves the edit on top of the original and moves the other photos of this subject to Immich\'s trash';
     edit.href = `/edit/${item.assetId}?suggestion=${item.id}`;
     const buttons = [apply, replace, dismiss];
-    const run = async (withReplace) => {
+    const run = async (trashSubject = []) => {
         buttons.forEach(b => { b.disabled = true; });
         try {
-            const { jobId } = await postJson(`/api/suggestions/${item.id}/apply`, { replace: withReplace });
-            await waitForJob(jobId, step => { apply.textContent = `${step}…`; });
-            finish(withReplace ? 'Saved; the original is in the trash' : 'Saved as a new version');
+            const { jobId } = await postJson(`/api/suggestions/${item.id}/apply`, { trashSubject });
+            const job = await waitForJob(jobId, step => { apply.textContent = `${step}…`; });
+            const trashed = job.result?.trashed?.length ?? 0;
+            finish(trashed ? `Saved; ${trashed} similar photo${trashed === 1 ? '' : 's'} moved to the trash` : 'Saved as a new version');
         } catch (error) {
             buttons.forEach(b => { b.disabled = false; });
             apply.textContent = 'Apply';
             status(error.message);
         }
     };
-    apply.addEventListener('click', () => run(false));
-    // Destructive-ish: ask for a second click instead of a browser dialog
-    replace.addEventListener('click', () => {
-        if (replace.dataset.armed) return run(true);
-        replace.dataset.armed = '1';
-        replace.textContent = 'Click again: original → trash';
-        setTimeout(() => { delete replace.dataset.armed; replace.textContent = 'Apply & replace'; }, 4000);
+    apply.addEventListener('click', () => run());
+    replace.addEventListener('click', async () => {
+        buttons.forEach(b => { b.disabled = true; });
+        replace.textContent = 'Loading…';
+        try {
+            const subject = await getJson(`/api/suggestions/${item.id}/subject`);
+            const confirmed = await confirmReplace(item, subject);
+            if (confirmed) return run(subject.others);
+        } catch (error) {
+            status(error.message);
+        } finally {
+            replace.textContent = 'Apply & replace';
+        }
+        buttons.forEach(b => { b.disabled = false; });
     });
     dismiss.addEventListener('click', async () => {
         await postJson(`/api/suggestions/${item.id}/dismiss`).catch(() => {});
@@ -241,6 +249,66 @@ function suggestionActions(item, { finish, removed, status }) {
     });
     actions.append(apply, replace, edit, dismiss);
     return actions;
+}
+
+const BADGE_ICONS = {
+    used: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9.5 16.2-4.2-4.2-1.4 1.4 5.6 5.6 11-11-1.4-1.4Z"/></svg>',
+    trash: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4l5.6 5.6L5 17.6 6.4 19l5.6-5.6 5.6 5.6 1.4-1.4-5.6-5.6Z"/></svg>',
+    added: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6Z"/></svg>',
+};
+
+// Asks before "Apply & replace": shows every photo of the suggestion's subject — the one
+// edited (kept, green), the others (trashed, red) and the new edit (added, white).
+// Resolves to true when the user confirms.
+function confirmReplace(item, { assetId, others }) {
+    return new Promise((resolve) => {
+        const dialog = element('dialog', 'replace-dialog');
+        dialog.setAttribute('aria-labelledby', 'replace-dialog-title');
+        const title = element('h2', '', others.length ? 'Keep this edit, trash the rest?' : 'Apply this edit?');
+        title.id = 'replace-dialog-title';
+        const grid = element('ul', 'replace-grid');
+        const tile = (src, kind, label) => {
+            const li = element('li', `replace-tile ${kind}`);
+            const img = element('img');
+            img.src = src;
+            img.alt = label;
+            img.loading = 'lazy';
+            const badge = element('span', 'replace-badge');
+            badge.innerHTML = BADGE_ICONS[kind];
+            li.title = label;
+            li.append(img, badge);
+            return li;
+        };
+        grid.append(tile(`/media/${assetId}/thumbnail`, 'used', 'Original: stays, the edit was made from it'));
+        for (const id of others) grid.append(tile(`/media/${id}/thumbnail`, 'trash', 'Same subject: moves to the trash'));
+        grid.append(tile(`/api/suggestions/${item.id}/after`, 'added', 'New edit: stacked on top as the primary'));
+        const n = others.length;
+        const text = element('p', 'replace-text');
+        text.textContent = 'The original (green) stays. The edit (white) is stacked on top of it and becomes the photo you see. '
+            + (n
+                ? `The ${n === 1 ? 'other photo' : `${n} other photos`} of this subject (red) ${n === 1 ? 'moves' : 'move'} to Immich's trash, which deletes ${n === 1 ? 'it' : 'them'} for good after 30 days. Until then you can restore ${n === 1 ? 'it' : 'them'} from the trash.`
+                : 'There are no other photos of this subject, so nothing goes to the trash.');
+        const actions = element('div', 'replace-actions');
+        const cancel = element('button', 'text-button', 'Cancel');
+        const confirm = element('button', `button${n ? ' danger' : ''}`, n ? `Apply & trash ${n}` : 'Apply');
+        cancel.type = 'button';
+        confirm.type = 'button';
+        actions.append(cancel, confirm);
+        dialog.append(title, grid, text, actions);
+        let result = false;
+        cancel.addEventListener('click', () => dialog.close());
+        confirm.addEventListener('click', () => { result = true; dialog.close(); });
+        // Escape closes only this dialog, not the full-screen preview behind it
+        dialog.addEventListener('keydown', (event) => { if (event.key === 'Escape') event.stopPropagation(); });
+        dialog.addEventListener('click', (event) => { if (event.target === dialog) dialog.close(); });
+        dialog.addEventListener('close', () => {
+            dialog.remove();
+            resolve(result);
+        });
+        document.body.append(dialog);
+        dialog.showModal();
+        cancel.focus();
+    });
 }
 
 // Press-and-hold on `target` shows the original in `img`, releasing shows the edit again

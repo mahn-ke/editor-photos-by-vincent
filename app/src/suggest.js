@@ -199,6 +199,9 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
     // building, view…) form a group; only its best candidate is shown. "Best" weighs how much
     // the edit improves the photo and how interesting the photo is in the first place, so a
     // good edit of a mundane shot loses to a good edit of a striking one.
+    const SAME_SUBJECT = 0.88;
+    const similar = (a, b) => a && b && a.reduce((s, v, i) => s + v * b[i], 0) > SAME_SUBJECT;
+
     function bestPerSubject(rows) {
         const candidates = rows.map((row) => {
             const scores = JSON.parse(row.scores ?? '{}');
@@ -208,7 +211,7 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
         const kept = [];
         for (const c of candidates) {
             const sameSubject = kept.some(k => k.row.asset_id === c.row.asset_id
-                || (k.embedding && c.embedding && k.embedding.reduce((s, v, i) => s + v * c.embedding[i], 0) > 0.88));
+                || similar(k.embedding, c.embedding));
             if (!sameSubject) kept.push(c);
         }
         return new Map(kept.map(k => [k.row.asset_id, k.row]));
@@ -231,6 +234,25 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
                 summary: describeRecipe(JSON.parse(row.recipe)), recipe: JSON.parse(row.recipe),
             })),
         };
+    }
+
+    // The other photos the greeting folded into this suggestion's subject (asset ids, newest
+    // uploads first); photos without an embedding never join a subject
+    function subject(userId, id) {
+        const row = q.get.get(id, userId);
+        const embedding = row?.embedding ? JSON.parse(row.embedding) : null;
+        if (!embedding) return [];
+        const ids = new Set();
+        for (const other of q.ready.all(userId, now() - WINDOWS.at(-1)[0])) {
+            if (other.asset_id === row.asset_id || !other.embedding) continue;
+            if (similar(embedding, JSON.parse(other.embedding))) ids.add(other.asset_id);
+        }
+        return [...ids];
+    }
+
+    // Photos that went to the trash: their suggestions are no longer offered
+    function retire(userId, assetIds) {
+        for (const assetId of assetIds) for (const row of q.forAsset.all(userId, assetId)) if (row.status === 'ready') q.setStatus.run('superseded', row.id);
     }
 
     function preview(userId, id, which) {
@@ -308,5 +330,5 @@ export function createSuggester({ db, immich, grader, learner, dataDir, log = co
             .map(row => ({ id: row.id, assetId: row.asset_id, name: row.name, why: row.why, recipe: JSON.parse(row.recipe), summary: describeRecipe(JSON.parse(row.recipe)) }));
     }
 
-    return { process, greeting, preview, get, forAsset, dismiss, accepted, manualEdit, discardedVersion, expire, forget, setStatus: (id, s) => q.setStatus.run(s, id) };
+    return { process, greeting, subject, retire, preview, get, forAsset, dismiss, accepted, manualEdit, discardedVersion, expire, forget, setStatus: (id, s) => q.setStatus.run(s, id) };
 }

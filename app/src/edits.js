@@ -89,7 +89,24 @@ export function createEditor({ immich, renderPool, maskStore = null, log = conso
         };
     }
 
-    async function save(token, originalId, rawRecipe, source, report, userId = null, { replace = false } = {}) {
+    // Moves `ids` (and the rest of their stacks, e.g. a RAW twin) to Immich's trash, never
+    // touching anything in `keep`; returns what was trashed
+    async function trashOthers(token, ids, keep) {
+        const targets = new Set();
+        for (const id of ids) {
+            if (keep.has(id)) continue;
+            const asset = await immich.asset(token, id).catch(() => null);
+            if (!asset || asset.isTrashed) continue;
+            targets.add(id);
+            if (!asset.stack?.id) continue;
+            const stack = await immich.stack(token, asset.stack.id).catch(() => null);
+            for (const member of stack?.assets ?? []) if (!keep.has(member.id)) targets.add(member.id);
+        }
+        if (targets.size) await immich.trash(token, [...targets]);
+        return [...targets];
+    }
+
+    async function save(token, originalId, rawRecipe, source, report, userId = null, { replace = false, trash = [] } = {}) {
         const recipe = normalizeRecipe(rawRecipe);
         if (isIdentity(recipe)) throw Object.assign(new Error('Nothing to save: the edit makes no changes'), { status: 400 });
         report('Loading the original');
@@ -155,7 +172,16 @@ export function createEditor({ immich, renderPool, maskStore = null, log = conso
         edits.push(entry);
         await writeEdits(token, originalId, edits);
         onEvent({ type: source === 'suggestion' ? 'suggestion-saved' : 'manual-edit', userId, originalId, editId, recipe });
-        return { editId, renderedAssetId, width: rendered.width, height: rendered.height, from };
+        let trashed = [];
+        if (trash.length) {
+            // Other photos of the same subject: the original's stack (with the new edit) stays
+            report(`Moving ${trash.length} similar photo${trash.length === 1 ? '' : 's'} to the trash`);
+            const stacked = await immich.asset(token, originalId);
+            const stack = stacked.stack?.id ? await immich.stack(token, stacked.stack.id).catch(() => null) : null;
+            const keep = new Set([originalId, renderedAssetId, ...(stack?.assets ?? []).map(a => a.id)]);
+            trashed = await trashOthers(token, trash, keep);
+        }
+        return { editId, renderedAssetId, width: rendered.width, height: rendered.height, from, trashed };
     }
 
     async function discard(token, originalId, editId, userId = null) {
@@ -201,14 +227,14 @@ export function createEditor({ immich, renderPool, maskStore = null, log = conso
     }
 
     // Saves run one at a time; the browser polls the job
-    function startSave({ token, userId, originalId, recipe, source, replace = false, onDone = null }) {
+    function startSave({ token, userId, originalId, recipe, source, replace = false, trash = [], onDone = null }) {
         const id = randomUUID();
         const job = { id, userId, status: 'queued', step: 'Waiting', result: null, error: null, createdAt: Date.now() };
         jobs.set(id, job);
         queue = queue.then(async () => {
             job.status = 'running';
             try {
-                job.result = await save(token, originalId, recipe, source, step => { job.step = step; }, userId, { replace });
+                job.result = await save(token, originalId, recipe, source, step => { job.step = step; }, userId, { replace, trash });
                 job.status = 'done';
                 job.step = 'Saved';
                 try {

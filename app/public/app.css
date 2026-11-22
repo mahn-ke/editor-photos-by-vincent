@@ -678,3 +678,104 @@ a.icon-button {
 .suggestion-full .suggestion-error:empty {
     display: none;
 }
+
+/* ---- Apply & replace confirmation ---- */
+
+.replace-dialog {
+    width: min(560px, calc(100vw - 32px));
+    max-height: calc(100dvh - 32px);
+    padding: 20px;
+    border: 0;
+    border-radius: 20px;
+    background: var(--bg);
+    color: var(--text);
+    box-shadow: var(--shadow);
+}
+
+.replace-dialog[open] {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto auto;
+    gap: 14px;
+}
+
+.replace-dialog::backdrop {
+    background: rgb(0 0 0 / 0.6);
+}
+
+.replace-dialog h2 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 500;
+}
+
+.replace-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+    gap: 10px;
+    margin: 0;
+    padding: 2px;
+    list-style: none;
+    overflow-y: auto;
+}
+
+.replace-tile {
+    position: relative;
+    aspect-ratio: 1;
+    border: 3px solid;
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--tile);
+}
+
+.replace-tile img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.replace-tile.used { border-color: #1e8e3e; }
+.replace-tile.trash { border-color: #d93025; }
+.replace-tile.trash img { opacity: 0.6; }
+.replace-tile.added { border-color: #fff; box-shadow: 0 0 0 1px var(--border); }
+
+.replace-badge {
+    position: absolute;
+    right: 5px;
+    bottom: 5px;
+    display: grid;
+    place-items: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    box-shadow: 0 1px 3px rgb(0 0 0 / 0.4);
+}
+
+.replace-badge svg {
+    width: 18px;
+    height: 18px;
+    fill: currentColor;
+}
+
+.used .replace-badge { background: #1e8e3e; color: #fff; }
+.trash .replace-badge { background: #d93025; color: #fff; }
+.added .replace-badge { background: #fff; color: #1d1f27; }
+
+.replace-text {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+.replace-actions {
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 16px;
+}
+
+.button.danger {
+    background: #d93025;
+    color: #fff;
+}
