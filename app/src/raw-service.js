@@ -9,7 +9,7 @@ import { pairKey, matchPair } from './raw-pairs.js';
 import { Worker } from 'node:worker_threads';
 import { MAX_DELTA_E, applyBaseline } from './raw.js';
 
-const INFO_VERSION = 3; // bump when development or fitting changes: cached matches are refitted
+const INFO_VERSION = 5; // bump when development or fitting changes: cached matches are refitted
 export const RAW_KEY = 'editor-photos-raw';
 // The RAW is only used when its crop has (almost) the JPEG's resolution: zoom shots store a
 // small crop that the camera upscales with multi-frame detail the RAW lacks
@@ -102,6 +102,17 @@ export function createRawService({ immich, dataDir, log = console }) {
         return dng;
     }
 
+    // The full-size camera JPEG in the cache (downloaded once); null when it is gone
+    async function cameraJpeg(auth, jpegId) {
+        const jpegFile = file(jpegId, 'jpg');
+        if (!existsSync(jpegFile)) {
+            const response = await immich.original(auth, jpegId);
+            if (!response.ok) return null;
+            writeFileSync(jpegFile, Buffer.from(await response.arrayBuffer()));
+        }
+        return jpegFile;
+    }
+
     async function jpegPreview(auth, jpegId) {
         const response = await immich.media(auth, jpegId, 'preview');
         const bytes = Buffer.from(await response.arrayBuffer());
@@ -115,11 +126,7 @@ export function createRawService({ immich, dataDir, log = console }) {
         const dng = await dngFile(auth, pair.raw.id);
         const jpeg = await jpegPreview(auth, jpegId);
         // The full-size camera JPEG, for fitting the sharpening to its detail
-        const jpegFile = file(jpegId, 'jpg');
-        if (!existsSync(jpegFile)) {
-            const response = await immich.original(auth, jpegId);
-            writeFileSync(jpegFile, Buffer.from(await response.arrayBuffer()));
-        }
+        const jpegFile = await cameraJpeg(auth, jpegId);
         const fitted = await runInWorker('fit', { dng, jpeg: { data: jpeg.data.buffer.slice(jpeg.data.byteOffset, jpeg.data.byteOffset + jpeg.data.byteLength), width: jpeg.width, height: jpeg.height }, jpegFile, previewFile: file(jpegId, 'preview.f32') });
         const { baseline } = fitted;
         const ok = baseline.quality.median <= MAX_DELTA_E && baseline.alignment.confidence >= 0.2;
@@ -151,9 +158,15 @@ export function createRawService({ immich, dataDir, log = console }) {
     }
 
     // Full-resolution 16-bit sRGB pixels: developed RAW, cropped to the JPEG's framing, with
-    // the baseline applied, at the JPEG's size (so masks and crops line up)
-    async function render(auth, rawId, baseline, size) {
-        return runInWorker('render', { dng: await dngFile(auth, rawId), baseline, size });
+    // the baseline applied, at the JPEG's size (so masks and crops line up). With the camera
+    // JPEG (`jpegId`) its fine detail is used (the phone's burst merge and deblur, which the DNG
+    // lacks); if it is gone, the fitted sharpening stands in
+    async function render(auth, rawId, baseline, size, jpegId = null) {
+        const jpegFile = jpegId ? await cameraJpeg(auth, jpegId).catch((error) => {
+            log.warn?.(`Camera JPEG ${jpegId} for RAW detail unavailable: ${error.message}`);
+            return null;
+        }) : null;
+        return runInWorker('render', { dng: await dngFile(auth, rawId), baseline, size, jpegFile });
     }
 
     // A RAW kept as the original (RAW_KEY metadata): its look as a JPEG preview, cached, or null
@@ -164,7 +177,7 @@ export function createRawService({ immich, dataDir, log = console }) {
         if (!stored?.baseline) return null;
         if (!inflight.has(cached)) {
             inflight.set(cached, (async () => {
-                const { width, height, buffer } = await render(auth, rawId, stored.baseline, stored.size);
+                const { width, height, buffer } = await render(auth, rawId, stored.baseline, stored.size, stored.jpegId);
                 const px = new Uint16Array(buffer);
                 const bytes = await sharp(Buffer.from(Uint8Array.from(px, v => v >> 8)), { raw: { width, height, channels: 3 } })
                     .resize({ width: 2048, height: 2048, fit: 'inside' }).jpeg({ quality: 90 }).toBuffer();

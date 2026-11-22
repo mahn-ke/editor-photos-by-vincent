@@ -3,7 +3,8 @@
 import { writeFileSync } from 'node:fs';
 import { parentPort } from 'node:worker_threads';
 import { resize } from '../public/edit/pipeline.js';
-import { applyBaseline, buildBaseline, cropForBaseline, fitDetail, prepareSource, sharpen } from './raw.js';
+import sharp from 'sharp';
+import { applyBaseline, buildBaseline, cropForBaseline, fitDetail, prepareSource, sharpen, transferDetail } from './raw.js';
 
 const PREVIEW_PIXELS = 1.6e6;
 const log = { info: message => parentPort.postMessage({ log: message }), warn: message => parentPort.postMessage({ log: message }) };
@@ -43,6 +44,22 @@ function fitEdges(img, w, h) {
     return { width: w, height: h, data: out };
 }
 
+// The camera JPEG upright, at the render's size (0..1), or null when it cannot be read
+async function cameraPixels(file, width, height) {
+    try {
+        let img = sharp(file).autoOrient().removeAlpha();
+        const meta = await sharp(file).metadata();
+        const swap = (meta.orientation ?? 1) >= 5;
+        const w = swap ? meta.height : meta.width, h = swap ? meta.width : meta.height;
+        if (w !== width || h !== height) img = img.resize({ width, height, fit: 'fill' });
+        const { data } = await img.raw().toBuffer({ resolveWithObject: true });
+        return { width, height, data: Float32Array.from(data, v => v / 255) };
+    } catch (error) {
+        log.warn?.(`Camera JPEG for detail unreadable: ${error.message}`);
+        return null;
+    }
+}
+
 const ops = {
     // Fits the baseline against the camera JPEG's preview pixels; writes the aligned linear
     // preview (Float32) for the editor's RAW endpoint
@@ -54,7 +71,7 @@ const ops = {
         // so it still applies once the JPEG is gone)
         if (jpegFile) {
             const { gains, cores, detail, noise } = await fitDetail(crop, baseline, jpegFile);
-            baseline.sharpen = { gains, cores };
+            baseline.sharpen = { gains, cores, detail };
             log.info(`RAW detail: ours/camera ${detail.join('/')}, noise ${noise}, sharpening ${gains.join('/')}`);
         }
         const scale = Math.min(1, Math.sqrt(PREVIEW_PIXELS / (crop.width * crop.height)));
@@ -62,8 +79,10 @@ const ops = {
         writeFileSync(previewFile, Buffer.from(small.data.buffer));
         return { result: { baseline, width: small.width, height: small.height, cropWidth: crop.width, cropHeight: crop.height } };
     },
-    // 16-bit sRGB pixels: the RAW with the camera look, cropped to the JPEG's framing and size
-    async render({ dng, baseline, size }) {
+    // 16-bit sRGB pixels: the RAW with the camera look, cropped to the JPEG's framing and size.
+    // With the camera JPEG (`jpegFile`), its fine detail replaces the RAW's (the phone's merge
+    // and deblur); without it, the fitted sharpening stands in
+    async render({ dng, baseline, size, jpegFile }) {
         let dev = await prepareSource(dng);
         const crop = cropForBaseline(dev, baseline.alignment);
         // The crop is a copy unless the frames match: only then keep the developed image intact
@@ -74,7 +93,9 @@ const ops = {
             const close = Math.abs(size.width / look.width - 1) < 0.01 && Math.abs(size.height / look.height - 1) < 0.01;
             look = close ? fitEdges(look, size.width, size.height) : resample(look, size.width, size.height);
         }
-        if (baseline.sharpen) sharpen(look, baseline.sharpen.gains, baseline.sharpen.cores);
+        const camera = jpegFile ? await cameraPixels(jpegFile, look.width, look.height) : null;
+        if (camera) transferDetail(look, camera);
+        else if (baseline.sharpen) sharpen(look, baseline.sharpen.gains, baseline.sharpen.cores);
         const px = new Uint16Array(look.data.length);
         for (let i = 0; i < px.length; i++) px[i] = Math.round(Math.min(1, Math.max(0, look.data[i])) * 65535);
         return { result: { width: look.width, height: look.height, depth: 16, buffer: px.buffer }, transfer: [px.buffer] };

@@ -6,7 +6,8 @@
 // - original, rendered versions (and a RAW sibling) share one stack; its primary is the version shown
 // - edits render from the RAW twin when its camera look can be matched (raw-service); applying a
 //   suggestion then keeps the RAW as the original: it gets the history and its baseline
-//   (`editor-photos-raw`), the edit is stacked on it and the camera JPEG goes to the trash
+//   (`editor-photos-raw`), the edit is stacked on it; the camera JPEG stays in the stack, as
+//   the RAW takes its fine detail (the phone's burst merge and deblur) from it
 
 import { randomUUID } from 'node:crypto';
 import { describeRecipe, isIdentity, normalizeRecipe } from '../public/edit/recipe.js';
@@ -52,11 +53,11 @@ export function createEditor({ immich, renderPool, maskStore = null, rawService 
         if (!rawService) return null;
         try {
             const stored = (await immich.metadata(token, original.id))[RAW_KEY];
-            if (stored?.baseline) return { decoded: await rawService.render(token, original.id, stored.baseline, stored.size), from: 'raw', rawId: original.id };
+            if (stored?.baseline) return { decoded: await rawService.render(token, original.id, stored.baseline, stored.size, stored.jpegId), from: 'raw', rawId: original.id };
             if (/\.dng$/i.test(original.originalFileName ?? '')) return null;
             const raw = await rawService.sourceFor(token, original);
             if (!raw) return null;
-            return { decoded: await rawService.render(token, raw.rawId, raw.baseline, raw.size), from: 'raw', ...raw };
+            return { decoded: await rawService.render(token, raw.rawId, raw.baseline, raw.size, original.id), from: 'raw', ...raw };
         } catch (error) {
             log.warn(`RAW source for ${original.id} failed, using the JPEG: ${error.message}`);
             return null;
@@ -185,21 +186,21 @@ export function createEditor({ immich, renderPool, maskStore = null, rawService 
         report('Stacking the new version');
         const fresh = await immich.asset(token, originalId);
         if (promote) {
-            // Only the RAW (with its history and baseline) and the edits stay; the JPEG goes
+            // The RAW (with its history and baseline) becomes the original; the camera JPEG stays
+            // in the stack, as the RAW's renders take their fine detail from it
             report('Keeping the RAW as the original');
             if (fresh.stack?.id) await immich.deleteStack(token, fresh.stack.id);
-            await immich.createStack(token, [renderedAssetId, src.rawId, ...edits.map(e => e.renderedAssetId)]);
+            await immich.createStack(token, [renderedAssetId, src.rawId, originalId, ...edits.map(e => e.renderedAssetId)]);
             await immich.setMetadata(token, src.rawId, RAW_KEY, { v: 1, baseline: src.baseline, size: src.size, quality: src.quality, jpegId: originalId });
             for (const e of edits) await immich.setMetadata(token, e.renderedAssetId, RENDER_KEY, { v: 1, originalId: src.rawId, editId: e.id });
             await writeEdits(token, src.rawId, [...edits, entry]);
             await writeEdits(token, originalId, []);
-            await immich.trash(token, [originalId]);
             onEvent({ type: 'suggestion-saved', userId, originalId, editId, recipe });
             const trashed = trash.length ? await trashOthers(token, trash, {
-                keep: new Set([src.rawId, renderedAssetId, ...edits.map(e => e.renderedAssetId)]),
+                keep: new Set([src.rawId, originalId, renderedAssetId, ...edits.map(e => e.renderedAssetId)]),
                 ownStackId: (await immich.asset(token, src.rawId)).stack?.id ?? null,
             }) : [];
-            return { editId, renderedAssetId, width: rendered.width, height: rendered.height, from, trashed: [originalId, ...trashed], keptRawId: src.rawId };
+            return { editId, renderedAssetId, width: rendered.width, height: rendered.height, from, trashed, keptRawId: src.rawId };
         }
         const currentPrimary = fresh.stack?.primaryAssetId ?? originalId;
         await immich.createStack(token, [renderedAssetId, currentPrimary]);

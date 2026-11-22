@@ -69,11 +69,14 @@ test('a suggestion\'s subject: similar photos taken around the same time, stack 
     assert.deepEqual((await suggester.subject('u', 't', 's1')).ids.sort(), expected);
     assert.deepEqual(suggester.storedSubject('other', 's1').ids, []);
 
-    // With a well-matched RAW twin, the RAW stays and the camera JPEG joins the trash
+    // With a well-matched RAW twin, the RAW stays and so does the camera JPEG (its detail source)
     const withRaw = createSuggester({ db, immich, grader: {}, learner: createLearner({ db, priors: armPriors() }), dataDir: mkdtempSync(path.join(tmpdir(), 'ep-')), log: { info() {}, warn() {} }, now: () => now,
         rawService: { sourceFor: async (auth, jpeg) => (jpeg.id === 'sky' ? { rawId: 'sky-raw' } : null) } });
     db.exec('UPDATE suggestions SET subject_at = NULL');
     await withRaw.prepareSubjects('u', 't');
     assert.equal(withRaw.storedSubject('u', 's1').keep, 'sky-raw');
-    assert.deepEqual(withRaw.storedSubject('u', 's1').ids.sort(), ['sky', 'sky-2', 'sky-2-raw', 'sky-3', 'sky-darker']);
+    assert.deepEqual(withRaw.storedSubject('u', 's1').ids.sort(), ['sky-2', 'sky-2-raw', 'sky-3', 'sky-darker']);
+    // Subjects stored before that listed the camera JPEG: it is no longer offered for the trash
+    db.prepare('UPDATE suggestions SET subject = ? WHERE id = \'s1\'').run(JSON.stringify({ keep: 'sky-raw', ids: ['sky', 'sky-3'] }));
+    assert.deepEqual(withRaw.storedSubject('u', 's1').ids, ['sky-3']);
 });

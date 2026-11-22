@@ -64,9 +64,9 @@ works it out after a batch of uploads settles; a suggestion is only shown once i
 known, so the dialog opens instantly.
 
 With `RAW_EDITS=1` edits render from a Pixel photo's RAW twin when its camera look can be matched,
-and Apply keeps the RAW (with the edit history and the fitted look) instead of the camera JPEG,
-which goes to the trash. Off by default: colours match, fine detail does not yet — see
-[docs/raw.md](docs/raw.md).
+taking the camera JPEG's fine detail (the phone's burst merge and deblur, which the DNG lacks), and
+Apply keeps the RAW as the original (with the edit history and the fitted look) with the camera
+JPEG stacked under it as its detail source. Off by default — see [docs/raw.md](docs/raw.md).
 
 ## Suggestions and background work
 

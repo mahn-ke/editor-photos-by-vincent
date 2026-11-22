@@ -250,13 +250,18 @@ export function orient(img, orientation) {
     return { width: ow, height: oh, data: out };
 }
 
-// Wavelet thresholds in noise σ (luma, chroma); RAW_DENOISE="luma,chroma" overrides, "0" turns it off
+// Sigma-filter thresholds in noise σ and the luma revert factor; RAW_DENOISE="luma,chroma,revert"
+// overrides, "0" turns it off
 const DENOISE = (() => {
     const v = process.env.RAW_DENOISE;
     if (v === '0') return null;
-    const [luma, chroma] = v ? v.split(',').map(Number) : [];
-    // Measured on eight Pixel pairs: noise at or below the camera JPEG's, detail ≈ 0.8–1.1×
-    return { luma: Number.isFinite(luma) ? luma : 2.5, chroma: Number.isFinite(chroma) ? chroma : 4 };
+    const [luma, chroma, revert, second] = v ? v.split(',').map(Number) : [];
+    const o = {};
+    if (Number.isFinite(luma)) o.luma = luma;
+    if (Number.isFinite(chroma)) o.chroma = chroma;
+    if (Number.isFinite(revert)) o.revert = revert;
+    if (Number.isFinite(second)) o.second = second;
+    return o;
 })();
 
 // Developed, denoised, lens-shading corrected and upright linear sRGB, ready to align
@@ -267,6 +272,7 @@ export async function prepareSource(file, { noise = DENOISE } = {}) {
     // Raw camera channels: denoise with the exact noise model, then lens shading per channel,
     // then white balance and colour
     if (toSrgb && noise) denoise(dev, parseNoiseProfile(tags.NoiseProfile), noise);
+    if (toSrgb) clipToWhite(dev, toSrgb.neutral);
     const shaded = applyMatrix(applyGainMaps(dev, parseGainMaps(tags.OpcodeList2)), toSrgb);
     const warped = applyWarp(shaded, parseWarp(tags.OpcodeList3));
     // The table is indexed by the pixel before baseline exposure (measured: lower error than after)
@@ -323,7 +329,26 @@ export function cameraToSrgb(tags) {
     const fm = mix3(fm1, fm2, w);
     const g = neutral[1];
     const balance = [[g / neutral[0], 0, 0], [0, 1, 0], [0, 0, g / neutral[2]]];
-    return mul3(XYZ50_TO_SRGB, mul3(fm, balance));
+    const m = mul3(XYZ50_TO_SRGB, mul3(fm, balance));
+    m.neutral = neutral;
+    return m;
+}
+
+// Every channel of the sensor saturates at 1 (unit white balance); white balance then lifts the
+// clipped red and blue above the clipped green and blown highlights turn magenta. Clipping each
+// channel where white saturates (the camera neutral scaled to its largest channel) keeps them
+// white, as dcraw's default highlight mode does.
+export function clipToWhite(img, neutral) {
+    if (!neutral || neutral.length !== 3) return img;
+    const top = Math.max(...neutral);
+    const limit = neutral.map(v => v / top);
+    const d = img.data;
+    for (let j = 0; j < d.length; j += 3) {
+        if (d[j] > limit[0]) d[j] = limit[0];
+        if (d[j + 1] > limit[1]) d[j + 1] = limit[1];
+        if (d[j + 2] > limit[2]) d[j + 2] = limit[2];
+    }
+    return img;
 }
 
 export function applyMatrix(img, m) {
@@ -339,13 +364,19 @@ export function applyMatrix(img, m) {
 }
 
 // ---- Noise reduction -----------------------------------------------------------------
+// Google Camera's finishing denoiser (shaders in libgcastartup.so: gaussian_3x3_downsample,
+// bilateral_filter_luma/_chroma, reconstruct_level): a Gaussian pyramid where every level is
+// cleaned with a noise-model "sigma filter" — the average of only those neighbours whose
+// difference to the centre is within the noise (diff² ≤ var), falling back to a 2σ set when
+// fewer than radius+1 pass (outliers) — and each finer level takes the coarser result as
+// `level + upsample(denoised(down(level)) − down(level))`. Luma is filtered at every level,
+// at full resolution with symmetric 3×3 pairs and a "revert factor" that blends part of the
+// original back (keeps fine texture and grain); chroma is filtered jointly with the denoised
+// luma (so it never bleeds across luma edges), sampling every second pixel.
 // The DNG NoiseProfile gives, per colour plane, variance = S·x + O (x: 0..1 raw). The generalised
-// Anscombe transform makes the noise unit-variance everywhere; an orthonormal luma/chroma split
-// follows (chroma is denoised harder, as in HDR+'s published finishing pipeline), then each
-// plane is decomposed with an à-trous B3-spline wavelet whose detail coefficients are
-// soft-thresholded at k·σ of that scale. In place, on raw camera RGB (before lens shading).
-
-const B3_SIGMA = [0.8908, 0.2007, 0.0856, 0.0413, 0.0205, 0.0103];
+// Anscombe transform makes that noise unit-variance; an orthonormal luma/chroma split follows.
+// The noise actually left in the merged DNG is then measured per level and by brightness
+// (noiseCurve). In place, on raw camera RGB (before lens shading).
 
 function mirror(i, n) {
     if (i < 0) i = -i;
@@ -376,24 +407,178 @@ function atrousPass(src, dst, w, h, step, horizontal) {
     }
 }
 
-// Soft-thresholds the wavelet detail of `plane` in place; thresholds[k] for scale k (2^k px)
-export function waveletShrink(plane, w, h, thresholds) {
-    let current = Float32Array.from(plane);
-    let next = new Float32Array(plane.length);
-    const tmp = new Float32Array(plane.length);
-    plane.fill(0);
-    for (let k = 0; k < thresholds.length; k++) {
-        atrousPass(current, tmp, w, h, 1 << k, true);
-        atrousPass(tmp, next, w, h, 1 << k, false);
-        const t = thresholds[k];
-        for (let i = 0; i < plane.length; i++) {
-            const d = current[i] - next[i];
-            plane[i] += d > t ? d - t : d < -t ? d + t : 0;
+// [1 2 1]²/16, then every second pixel: pixel k of the result sits on pixel 2k of the input
+export function downsample(src, w, h) {
+    const dw = (w + 1) >> 1, dh = (h + 1) >> 1;
+    const tmp = new Float32Array(dw * h), dst = new Float32Array(dw * dh);
+    for (let y = 0; y < h; y++) {
+        const row = y * w, out = y * dw;
+        for (let x = 0; x < dw; x++) {
+            const c = 2 * x;
+            tmp[out + x] = 0.25 * (src[row + mirror(c - 1, w)] + 2 * src[row + c] + src[row + mirror(c + 1, w)]);
         }
-        [current, next] = [next, current];
     }
-    for (let i = 0; i < plane.length; i++) plane[i] += current[i];
-    return plane;
+    for (let y = 0; y < dh; y++) {
+        const c = 2 * y, a = mirror(c - 1, h) * dw, b = c * dw, d = mirror(c + 1, h) * dw, out = y * dw;
+        for (let x = 0; x < dw; x++) dst[out + x] = 0.25 * (tmp[a + x] + 2 * tmp[b + x] + tmp[d + x]);
+    }
+    return { data: dst, width: dw, height: dh };
+}
+
+// plane += bilinear upsample of (denoised − downsampled), both dw×dh (reconstruct_level)
+function addCorrection(plane, w, h, denoised, down, dw, dh) {
+    for (let y = 0; y < h; y++) {
+        const fy = y / 2, y0 = Math.min(dh - 1, Math.floor(fy)), y1 = Math.min(dh - 1, y0 + 1), ty = fy - Math.floor(fy);
+        for (let x = 0; x < w; x++) {
+            const fx = x / 2, x0 = Math.min(dw - 1, Math.floor(fx)), x1 = Math.min(dw - 1, x0 + 1), tx = fx - Math.floor(fx);
+            const i00 = y0 * dw + x0, i01 = y0 * dw + x1, i10 = y1 * dw + x0, i11 = y1 * dw + x1;
+            const d00 = denoised[i00] - down[i00], d01 = denoised[i01] - down[i01];
+            const d10 = denoised[i10] - down[i10], d11 = denoised[i11] - down[i11];
+            plane[y * w + x] += (d00 * (1 - tx) + d01 * tx) * (1 - ty) + (d10 * (1 - tx) + d11 * tx) * ty;
+        }
+    }
+}
+
+// Sigma filter on one plane (bilateral_filter_luma.frag). `variance`: the noise variance of a
+// pixel. radius 1: the four symmetric pairs around the centre are averaged first, then tested;
+// larger radii test soft mirror pairs (¾·a + ¼·b and ¼·a + ¾·b of opposite neighbours).
+// `revert` blends the original back. `variance`: a number, or a function of the centre value.
+export function sigmaFilter(src, w, h, { radius = 1, variance, revert = 0 }) {
+    const varOf = typeof variance === 'function' ? variance : () => variance;
+    const dst = new Float32Array(src.length);
+    const outlier = radius + 1;
+    const offsets = [];
+    for (let dy = 0; dy <= radius; dy++) for (let dx = -radius; dx <= radius; dx++) if (dy > 0 || dx > 0) offsets.push([dx, dy]);
+    for (let y = 0; y < h; y++) {
+        const inner = y >= radius && y < h - radius;
+        for (let x = 0; x < w; x++) {
+            const fast = inner && x >= radius && x < w - radius;
+            const c = src[y * w + x];
+            const vn = varOf(c);
+            let s0 = 0, s1 = 0, n0 = 0, n1 = 0;
+            const take = (v) => {
+                const d = (c - v) * (c - v);
+                if (d <= vn) { s0 += v; n0++; }
+                if (d <= 4 * vn) { s1 += v; n1++; }
+            };
+            for (const [dx, dy] of offsets) {
+                const a = fast ? src[(y + dy) * w + x + dx] : src[mirror(y + dy, h) * w + mirror(x + dx, w)];
+                const b = fast ? src[(y - dy) * w + x - dx] : src[mirror(y - dy, h) * w + mirror(x - dx, w)];
+                if (radius === 1) take(0.5 * (a + b));
+                else { take(0.75 * a + 0.25 * b); take(0.25 * a + 0.75 * b); }
+            }
+            if (radius === 1) { n0 = 2 * n0 + 1; s0 = 2 * s0 + c; n1 = 2 * n1 + 1; s1 = 2 * s1 + c; }
+            else { n0++; s0 += c; n1++; s1 += c; }
+            const f = n0 > outlier ? s0 / n0 : s1 / n1;
+            dst[y * w + x] = revert ? f + (c - f) * revert : f;
+        }
+    }
+    return dst;
+}
+
+// Joint chroma sigma filter (bilateral_filter_chroma.frag): neighbours every `step` pixels,
+// accepted when (Δluma² + Δu² + Δv²) ≤ variance (a number, or a function of the luma); luma is
+// the already denoised luma
+export function sigmaFilterChroma(lum, u, v, w, h, { radius = 2, step = 2, variance }) {
+    const varOf = typeof variance === 'function' ? variance : () => variance;
+    const ou = new Float32Array(u.length), ov = new Float32Array(v.length);
+    const outlier = radius;
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const i = y * w + x, cl = lum[i], cu = u[i], cv = v[i], vn = varOf(cl);
+        let su0 = cu, sv0 = cv, su1 = cu, sv1 = cv, n0 = 1, n1 = 1;
+        for (let j = -radius; j <= radius; j++) {
+            const yy = mirror(y + j * step, h) * w;
+            for (let k = -radius; k <= radius; k++) {
+                if (j === 0 && k === 0) continue;
+                const s = yy + mirror(x + k * step, w);
+                const dl = cl - lum[s], du = cu - u[s], dv = cv - v[s];
+                const d = dl * dl + du * du + dv * dv;
+                if (d <= vn) { su0 += u[s]; sv0 += v[s]; n0++; }
+                if (d <= 4 * vn) { su1 += u[s]; sv1 += v[s]; n1++; }
+            }
+        }
+        const [su, sv, n] = n0 > outlier ? [su0, sv0, n0] : [su1, sv1, n1];
+        ou[i] = su / n; ov[i] = sv / n;
+    }
+    return [ou, ov];
+}
+
+// The noise σ actually in `plane`, as a function of brightness (`lum`, same size): per 16×16 block
+// the RMS of the diagonal 2×2 residual (a − b − c + d)/2 and the mean of `lum`; blocks are
+// grouped by brightness and the 20th percentile of each group (its flat blocks) is its noise.
+// Returns a lookup lum → σ. Pixel DNGs are merged bursts: their NoiseProfile overstates the
+// noise by a factor that differs per photo and with brightness (measured 0.3–1.2), which the
+// camera knows from the merge (its denoise strength map); we measure it.
+export function noiseCurve(plane, lum, w, h) {
+    const B = 16, blocks = [];
+    for (let by = 0; by + B <= h; by += B) for (let bx = 0; bx + B <= w; bx += B) {
+        let e = 0, m = 0;
+        for (let y = by; y < by + B; y += 2) for (let x = bx; x < bx + B; x += 2) {
+            const i = y * w + x;
+            const r = (plane[i] - plane[i + 1] - plane[i + w] + plane[i + w + 1]) / 2;
+            e += r * r;
+            m += lum[i] + lum[i + 1] + lum[i + w] + lum[i + w + 1];
+        }
+        blocks.push([m / (B * B), Math.sqrt(e / (B * B / 4))]);
+    }
+    if (blocks.length < 4) return () => 1;
+    blocks.sort((p, q) => p[0] - q[0]);
+    const groups = Math.max(1, Math.min(8, Math.floor(blocks.length / 32)));
+    const knots = [];
+    for (let g = 0; g < groups; g++) {
+        const part = blocks.slice(Math.floor(g * blocks.length / groups), Math.floor((g + 1) * blocks.length / groups));
+        const rms = part.map(p => p[1]).sort((p, q) => p - q);
+        knots.push([part[part.length >> 1][0], rms[Math.floor(rms.length * 0.2)]]);
+    }
+    return (v) => {
+        if (v <= knots[0][0]) return knots[0][1];
+        for (let k = 1; k < knots.length; k++) {
+            if (v <= knots[k][0]) {
+                const t = (v - knots[k - 1][0]) / Math.max(1e-9, knots[k][0] - knots[k - 1][0]);
+                return knots[k - 1][1] + t * (knots[k][1] - knots[k - 1][1]);
+            }
+        }
+        return knots[knots.length - 1][1];
+    };
+}
+
+function denoiseLuma(plane, w, h, level, o) {
+    let y = plane;
+    if (level + 1 < o.levels && w >= 32 && h >= 32) {
+        const down = downsample(plane, w, h);
+        const denoised = denoiseLuma(down.data, down.width, down.height, level + 1, o);
+        y = Float32Array.from(plane);
+        addCorrection(y, w, h, denoised, down.data, down.width, down.height);
+    }
+    // Measured on this level (demosaicing and the burst merge correlate the noise, so it does
+    // not fall off as white noise would) and by brightness
+    const sigma = noiseCurve(plane, plane, w, h);
+    const variance = c => (o.luma * sigma(c)) ** 2;
+    const radius = level === 0 ? 1 : 2;
+    // Two passes per level (LumaDenoisePyramidLevelFirst/SecondBilateralFilter); the second sees
+    // the noise the first left
+    const first = sigmaFilter(y, w, h, { radius, variance });
+    const second = sigmaFilter(first, w, h, { radius, variance: variance * o.second });
+    if (level > 0 || !o.revert) return second;
+    for (let i = 0; i < second.length; i++) second[i] += (y[i] - second[i]) * o.revert;
+    return second;
+}
+
+// Returns denoised [u, v] for this level. `noisy`: the luma before denoising, for the noise model
+// (as the camera's chroma filter, the threshold is the luma noise). The camera filters chroma
+// from its half-resolution (4:2:0) plane down; we keep full-resolution chroma, so level 0 is
+// filtered too (step 2 samples the same grid)
+function denoiseChroma(lum, noisy, u, v, w, h, level, o) {
+    let cu = u, cv = v;
+    if (level + 1 < o.levels && w >= 32 && h >= 32) {
+        const dl = downsample(lum, w, h), dn = downsample(noisy, w, h), du = downsample(u, w, h), dv = downsample(v, w, h);
+        const [eu, ev] = denoiseChroma(dl.data, dn.data, du.data, dv.data, dl.width, dl.height, level + 1, o);
+        cu = Float32Array.from(u); cv = Float32Array.from(v);
+        addCorrection(cu, w, h, eu, du.data, du.width, du.height);
+        addCorrection(cv, w, h, ev, dv.data, dv.width, dv.height);
+    }
+    const sigma = noiseCurve(noisy, noisy, w, h);
+    return sigmaFilterChroma(lum, cu, cv, w, h, { radius: 2, step: 2, variance: l => (o.chroma * sigma(l)) ** 2 });
 }
 
 export function parseNoiseProfile(value) {
@@ -405,7 +590,8 @@ export function parseNoiseProfile(value) {
 
 const INV_SQRT3 = 1 / Math.sqrt(3), INV_SQRT2 = 1 / Math.SQRT2, INV_SQRT6 = 1 / Math.sqrt(6);
 
-export function denoise(img, profile, { luma = 1, chroma = 3, scales = 5 } = {}) {
+// luma / chroma: the sigma filter's threshold in noise σ; revert: share of the original luma kept
+export function denoise(img, profile, { luma = 3, chroma = 3, revert = 0.15, second = 1, levels = 5 } = {}) {
     if (!profile) return img;
     const { width: w, height: h, data } = img;
     const n = w * h;
@@ -418,11 +604,10 @@ export function denoise(img, profile, { luma = 1, chroma = 3, scales = 5 } = {})
         planes[1][p] = (r - b) * INV_SQRT2;
         planes[2][p] = (r - 2 * g + b) * INV_SQRT6;
     }
-    if (luma > 0) waveletShrink(planes[0], w, h, B3_SIGMA.slice(0, scales).map(s => s * luma));
-    if (chroma > 0) {
-        waveletShrink(planes[1], w, h, B3_SIGMA.slice(0, scales).map(s => s * chroma));
-        waveletShrink(planes[2], w, h, B3_SIGMA.slice(0, scales).map(s => s * chroma));
-    }
+    const o = { luma, chroma, revert, second, levels };
+    const noisy = planes[0];
+    if (luma > 0) planes[0] = denoiseLuma(noisy, w, h, 0, o);
+    if (chroma > 0) [planes[1], planes[2]] = denoiseChroma(planes[0], noisy, planes[1], planes[2], w, h, 0, o);
     const inv = (v, S, O) => { const half = v * S / 2; return Math.max(0, (half * half - 0.375 * S * S - O) / S); };
     for (let p = 0, j = 0; p < n; p++, j += 3) {
         const y = planes[0][p] * INV_SQRT3, c1 = planes[1][p] * INV_SQRT2, c2 = planes[2][p] * INV_SQRT6;
@@ -467,6 +652,53 @@ export function sharpen(img, gains, cores = []) {
         let add = 0;
         for (let k = 0; k < gains.length; k++) add += gains[k] * core(bands[k][p], cores[k] ?? 0);
         d[j] += add; d[j + 1] += add; d[j + 2] += add;
+    }
+    return img;
+}
+
+// ---- Camera detail ---------------------------------------------------------------------
+// The camera JPEG's fine detail comes from the burst merge and ML deblur on the phone, which a
+// single DNG cannot reproduce (the frames are not saved; the models run only on the Tensor TPU).
+// With the JPEG at hand (same framing and size, display-referred, values 0..1), the luma detail
+// of à-trous scales 0..scales-1 (1–16 px) is taken from it; tone, colour and coarser structure
+// stay the RAW's. Where the JPEG is clipped or crushed its detail is gone, so there (smoothly,
+// by the JPEG's local brightness) the RAW keeps its own — the highlight and shadow detail an
+// edit can bring back.
+export const DETAIL_SCALES = 5;
+const CLIP_HI = [0.975, 0.995], CLIP_LO = [0.004, 0.015];
+
+function lumaPlane(img) {
+    const { width: w, height: h, data } = img;
+    const out = new Float32Array(w * h);
+    for (let p = 0, j = 0; p < w * h; p++, j += 3) out[p] = 0.2126 * data[j] + 0.7152 * data[j + 1] + 0.0722 * data[j + 2];
+    return out;
+}
+
+const ramp = (v, [a, b]) => Math.min(1, Math.max(0, (v - a) / (b - a)));
+
+export function transferDetail(img, jpeg, { scales = DETAIL_SCALES } = {}) {
+    const { width: w, height: h, data } = img;
+    if (jpeg.width !== w || jpeg.height !== h) throw new Error('transferDetail: sizes differ');
+    const n = w * h;
+    let co = lumaPlane(img), cj = lumaPlane(jpeg);
+    // How much of the JPEG's detail to take: none where it is clipped (from the brightest
+    // channel) or crushed, judged on its 4-px smoothed brightness so a clipped area's edges count
+    const trust = new Float32Array(n);
+    for (let p = 0, j = 0; p < n; p++, j += 3) trust[p] = Math.max(jpeg.data[j], jpeg.data[j + 1], jpeg.data[j + 2]);
+    let no = new Float32Array(n), nj = new Float32Array(n);
+    const tmp = new Float32Array(n), add = new Float32Array(n);
+    for (let k = 0; k < 3; k++) { atrousPass(trust, tmp, w, h, 1 << k, true); atrousPass(tmp, no, w, h, 1 << k, false); trust.set(no); }
+    for (let p = 0; p < n; p++) trust[p] = (1 - ramp(trust[p], CLIP_HI)) * ramp(cj[p], CLIP_LO);
+    for (let k = 0; k < scales; k++) {
+        atrousPass(co, tmp, w, h, 1 << k, true); atrousPass(tmp, no, w, h, 1 << k, false);
+        atrousPass(cj, tmp, w, h, 1 << k, true); atrousPass(tmp, nj, w, h, 1 << k, false);
+        for (let i = 0; i < n; i++) add[i] += ((cj[i] - nj[i]) - (co[i] - no[i])) * trust[i];
+        [co, no] = [no, co];
+        [cj, nj] = [nj, cj];
+    }
+    for (let p = 0, j = 0; p < n; p++, j += 3) {
+        const a = add[p];
+        data[j] += a; data[j + 1] += a; data[j + 2] += a;
     }
     return img;
 }
@@ -952,17 +1184,21 @@ function fitSharpenOnce(ours, jpeg, coring, fixedCores) {
     return { gains, cores, detail, noise: Math.round(noise * 100) / 100 };
 }
 
+// Above this a band's boost makes halos and a painted look: where the camera JPEG has more
+// detail than that, the DNG frame does not hold it (shake; the camera merges and deblurs)
+export const MAX_SHARPEN = 1.5;
+
 // Boosting a band and splitting the result again does not return the same band (the scales
 // overlap), so the gains are refined by applying them and measuring again
 export function fitSharpen(ours, jpeg, { coring = 3, iterations = 3 } = {}) {
     const first = fitSharpenOnce(ours, jpeg, coring);
     const cores = first.cores;
-    let gains = first.gains;
+    let gains = first.gains.map(g => Math.min(MAX_SHARPEN, g));
     for (let i = 1; i < iterations; i++) {
         const trial = { width: ours.width, height: ours.height, data: Float32Array.from(ours.data) };
         sharpen(trial, gains, cores);
         const next = fitSharpenOnce(trial, jpeg, coring, cores.map(() => 0));
-        gains = gains.map((g, k) => Math.min(6, Math.max(-0.6, (1 + g) * (1 + next.gains[k]) - 1)));
+        gains = gains.map((g, k) => Math.min(MAX_SHARPEN, Math.max(-0.6, (1 + g) * (1 + next.gains[k]) - 1)));
     }
     return {
         gains: gains.map(g => Math.round(g * 100) / 100),

@@ -214,7 +214,7 @@ describe('apply and trash the rest of the subject', () => {
 });
 
 describe('apply keeps a well-matched RAW as the original', () => {
-    test('the edit renders from the RAW, the RAW gets history and baseline, the JPEG goes to the trash', async () => {
+    test('the edit renders from the RAW with the camera JPEG\'s detail, the RAW gets history and baseline, the JPEG stays', async () => {
         const { createEditor } = await import('../src/edits.js');
         const { createImmichClient } = await import('../src/immich.js');
         const { createRenderPool } = await import('../src/render.js');
@@ -225,8 +225,8 @@ describe('apply keeps a well-matched RAW as the original', () => {
         const rendered = [];
         const rawService = {
             sourceFor: async (auth, asset) => (asset.id === jpeg.id ? { rawId: raw.id, baseline: { fake: true }, size: { width: 60, height: 40 }, quality: { median: 3 } } : null),
-            render: async (auth, rawId) => {
-                rendered.push(rawId);
+            render: async (auth, rawId, baseline, size, jpegId) => {
+                rendered.push([rawId, jpegId]);
                 const px = new Uint16Array(60 * 40 * 3).fill(30000);
                 return { width: 60, height: 40, depth: 16, buffer: px.buffer };
             },
@@ -235,12 +235,13 @@ describe('apply keeps a well-matched RAW as the original', () => {
         const editor = createEditor({ immich: createImmichClient({ baseUrl: stack.fake.url }), renderPool, rawService, log: { info() {}, warn() {}, error() {} } });
         const result = await editor.save('t', jpeg.id, RECIPE, 'suggestion', () => {}, null, { keepRaw: true, trash: [similar.id] });
         await renderPool.close();
-        assert.deepEqual(rendered, [raw.id], 'rendered from the RAW');
+        assert.deepEqual(rendered, [[raw.id, jpeg.id]], 'rendered from the RAW, with the camera JPEG for detail');
         assert.equal(result.from, 'raw');
         assert.equal(result.keptRawId, raw.id);
-        assert.deepEqual(new Set(stack.fake.stackOf(raw.id).assetIds), new Set([raw.id, result.renderedAssetId]), 'a stack of the RAW and the edit');
+        assert.deepEqual(new Set(stack.fake.stackOf(raw.id).assetIds), new Set([raw.id, jpeg.id, result.renderedAssetId]), 'a stack of the RAW, the camera JPEG and the edit');
         assert.equal(stack.fake.stackOf(raw.id).primaryAssetId, result.renderedAssetId);
-        assert.equal(stack.fake.assets.get(jpeg.id).isTrashed, true, 'camera JPEG in the trash');
+        assert.equal(stack.fake.assets.get(jpeg.id).isTrashed ?? false, false, 'camera JPEG kept');
+        assert.ok(!result.trashed.includes(jpeg.id));
         assert.equal(stack.fake.assets.get(similar.id).isTrashed, true);
         assert.equal(stack.fake.assets.get(raw.id).isTrashed ?? false, false);
         const meta = stack.fake.metadata.get(raw.id);

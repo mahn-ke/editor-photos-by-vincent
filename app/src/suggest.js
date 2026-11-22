@@ -288,13 +288,14 @@ export function createSuggester({ db, immich, grader, learner, dataDir, rawServi
         const chosen = await immich.asset(auth, row.asset_id);
         const takenAt = new Date(chosen.fileCreatedAt).getTime();
         const embedding = row.embedding ? JSON.parse(row.embedding) : await embeddingOf(userId, auth, row.asset_id).catch(() => null);
-        // A well-matched RAW twin is kept as the original instead of the camera JPEG
+        // A well-matched RAW twin is kept as the original; the camera JPEG stays with it (the
+        // RAW takes its fine detail from it)
         const raw = rawService ? await rawService.sourceFor(auth, chosen).catch((error) => {
             log.warn(`RAW match for ${row.asset_id} failed: ${error.message}`);
             return null;
         }) : null;
         const keep = raw?.rawId ?? row.asset_id;
-        const ids = keep === row.asset_id ? [] : [row.asset_id];
+        const ids = [];
         const seen = new Set([row.asset_id, keep]);
         // The suggestion's own stack: other non-edits (a RAW twin not kept) go, earlier edits stay
         if (chosen.stack?.id) {
@@ -380,7 +381,9 @@ export function createSuggester({ db, immich, grader, learner, dataDir, rawServi
         const row = q.get.get(id, userId);
         if (!row?.subject) return { keep: row?.asset_id ?? null, ids: [] };
         const value = JSON.parse(row.subject);
-        return Array.isArray(value) ? { keep: row.asset_id, ids: value } : value;
+        if (Array.isArray(value)) return { keep: row.asset_id, ids: value };
+        // Subjects stored before the camera JPEG was kept with its RAW listed it for the trash
+        return { ...value, ids: value.ids.filter(assetId => assetId !== row.asset_id) };
     }
 
     // Photos that went to the trash: their suggestions are no longer offered
