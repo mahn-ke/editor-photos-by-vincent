@@ -201,53 +201,41 @@ async function waitForJob(jobId, onStep) {
     }
 }
 
-// The four ways to proceed with a suggestion; shared by the card and the full-screen view.
+// The three ways to proceed with a suggestion; shared by the card and the full-screen view.
+// "Apply" keeps the original, stacks the edit on top and — after asking — moves the other
+// photos of the same subject to the trash.
 // `finish(text)` is called after a save, `removed()` after a dismissal.
 function suggestionActions(item, { finish, removed, status }) {
     const actions = element('div', 'suggestion-actions');
     const apply = element('button', 'button', 'Apply');
-    const replace = element('button', 'text-button', 'Apply & replace');
     const edit = element('a', 'text-link', 'Edit');
     const dismiss = element('button', 'text-button', 'Dismiss');
     apply.type = 'button';
-    replace.type = 'button';
     dismiss.type = 'button';
-    replace.title = 'Saves the edit on top of the original and moves the other photos of this subject to Immich\'s trash';
+    apply.title = 'Stacks the edit on top of the original; other photos of this subject go to Immich\'s trash';
     edit.href = `/edit/${item.assetId}?suggestion=${item.id}`;
-    const buttons = [apply, replace, dismiss];
-    const run = async (trashSubject = []) => {
-        buttons.forEach(b => { b.disabled = true; });
+    const buttons = [apply, dismiss];
+    const enable = (on) => buttons.forEach(b => { b.disabled = !on; });
+    apply.addEventListener('click', async () => {
+        enable(false);
         try {
-            const { jobId } = await postJson(`/api/suggestions/${item.id}/apply`, { trashSubject });
+            const subject = await getJson(`/api/suggestions/${item.id}/subject`);
+            if (subject.others.length && !(await confirmReplace(item, subject))) return enable(true);
+            const { jobId } = await postJson(`/api/suggestions/${item.id}/apply`, { trashSubject: subject.others });
             const job = await waitForJob(jobId, step => { apply.textContent = `${step}…`; });
             const trashed = job.result?.trashed?.length ?? 0;
             finish(trashed ? `Saved; ${trashed} similar photo${trashed === 1 ? '' : 's'} moved to the trash` : 'Saved as a new version');
         } catch (error) {
-            buttons.forEach(b => { b.disabled = false; });
+            enable(true);
             apply.textContent = 'Apply';
             status(error.message);
         }
-    };
-    apply.addEventListener('click', () => run());
-    replace.addEventListener('click', async () => {
-        buttons.forEach(b => { b.disabled = true; });
-        replace.textContent = 'Loading…';
-        try {
-            const subject = await getJson(`/api/suggestions/${item.id}/subject`);
-            const confirmed = await confirmReplace(item, subject);
-            if (confirmed) return run(subject.others);
-        } catch (error) {
-            status(error.message);
-        } finally {
-            replace.textContent = 'Apply & replace';
-        }
-        buttons.forEach(b => { b.disabled = false; });
     });
     dismiss.addEventListener('click', async () => {
         await postJson(`/api/suggestions/${item.id}/dismiss`).catch(() => {});
         removed();
     });
-    actions.append(apply, replace, edit, dismiss);
+    actions.append(apply, edit, dismiss);
     return actions;
 }
 
@@ -257,14 +245,14 @@ const BADGE_ICONS = {
     added: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6Z"/></svg>',
 };
 
-// Asks before "Apply & replace": shows every photo of the suggestion's subject — the one
+// Asks before "Apply" trashes anything: shows every photo of the suggestion's subject — the one
 // edited (kept, green), the others (trashed, red) and the new edit (added, white).
 // Resolves to true when the user confirms.
 function confirmReplace(item, { assetId, others }) {
     return new Promise((resolve) => {
         const dialog = element('dialog', 'replace-dialog');
         dialog.setAttribute('aria-labelledby', 'replace-dialog-title');
-        const title = element('h2', '', others.length ? 'Keep this edit, trash the rest?' : 'Apply this edit?');
+        const title = element('h2', '', 'Keep this edit, trash the rest?');
         title.id = 'replace-dialog-title';
         const grid = element('ul', 'replace-grid');
         const tile = (src, kind, label) => {
@@ -285,12 +273,10 @@ function confirmReplace(item, { assetId, others }) {
         const n = others.length;
         const text = element('p', 'replace-text');
         text.textContent = 'The original (green) stays. The edit (white) is stacked on top of it and becomes the photo you see. '
-            + (n
-                ? `The ${n === 1 ? 'other photo' : `${n} other photos`} of this subject (red) ${n === 1 ? 'moves' : 'move'} to Immich's trash, which deletes ${n === 1 ? 'it' : 'them'} for good after 30 days. Until then you can restore ${n === 1 ? 'it' : 'them'} from the trash.`
-                : 'There are no other photos of this subject, so nothing goes to the trash.');
+            + `The ${n === 1 ? 'other photo' : `${n} other photos`} of this subject (red) ${n === 1 ? 'moves' : 'move'} to Immich's trash, which deletes ${n === 1 ? 'it' : 'them'} for good after 30 days. Until then you can restore ${n === 1 ? 'it' : 'them'} from the trash.`;
         const actions = element('div', 'replace-actions');
         const cancel = element('button', 'text-button', 'Cancel');
-        const confirm = element('button', `button${n ? ' danger' : ''}`, n ? `Apply & trash ${n}` : 'Apply');
+        const confirm = element('button', 'button danger', `Apply & trash ${n}`);
         cancel.type = 'button';
         confirm.type = 'button';
         actions.append(cancel, confirm);

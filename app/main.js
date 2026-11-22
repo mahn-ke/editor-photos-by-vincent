@@ -44,7 +44,17 @@ const background = createBackground({
         newAsset: async (userId, auth, asset) => {
             if (asset.type === 'IMAGE') background.enqueue(userId, 'suggest', asset.id);
         },
-        suggest: (userId, auth, assetId) => suggester.process(userId, auth, assetId),
+        // After a batch of uploads settles, work out the subjects of new suggestions; until then
+        // they are not shown, so "Apply" can show the whole subject at once
+        suggest: async (userId, auth, assetId) => {
+            const outcome = await suggester.process(userId, auth, assetId);
+            if (outcome !== 'done-before') background.enqueue(userId, 'subjects', '', 60000);
+            return outcome;
+        },
+        subjects: async (userId, auth) => {
+            await suggester.prepareSubjects(userId, auth);
+            return 'ok';
+        },
         // Fill the greeting with the last 4 weeks of uploads (up to 60 photos)
         'suggest-backfill': async (userId, auth) => {
             const since = new Date(Date.now() - 28 * 24 * 3600e3).toISOString();
@@ -52,7 +62,10 @@ const background = createBackground({
             for (const a of items) if (a.ownerId === undefined || a.ownerId === userId) background.enqueue(userId, 'suggest', a.id);
             return 'ok';
         },
-        afterPoll: async () => suggester.expire(),
+        afterPoll: async (userId) => {
+            suggester.expire();
+            background.enqueue(userId, 'subjects', '', 1000);
+        },
     },
 });
 const rawService = createRawService({ immich, dataDir: config.cacheDir });

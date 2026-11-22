@@ -42,6 +42,7 @@ test('prepares previews for a new photo, shows them in the greeting, and learns 
     const photo = [...fake.assets.values()].find(a => a.isImage);
     photo.createdAt = new Date(clock - 3600e3).toISOString(); // uploaded an hour ago
     const outcome = await suggester.process(FAKE_USER.id, 't', photo.id);
+    await suggester.prepareSubjects(FAKE_USER.id, 't');
     assert.match(outcome, /^suggested:[12]$/);
     assert.equal(await suggester.process(FAKE_USER.id, 't', photo.id), 'done-before', 'each photo is processed once');
 
@@ -64,6 +65,7 @@ test('older uploads widen the greeting window', async () => {
     photo.createdAt = new Date(clock - 2.5 * 24 * 3600e3).toISOString();
     for (const s of suggester.greeting(FAKE_USER.id).suggestions) suggester.dismiss(FAKE_USER.id, s.id);
     await suggester.process(FAKE_USER.id, 't', photo.id);
+    await suggester.prepareSubjects(FAKE_USER.id, 't');
     assert.equal(suggester.greeting(FAKE_USER.id).window, '3 days');
 });
 
@@ -71,6 +73,7 @@ test('accepting with tweaks teaches strength; edited photos and RAW halves are s
     const photo = [...fake.assets.values()].filter(a => a.isImage)[2];
     photo.createdAt = new Date(clock - 3600e3).toISOString();
     await suggester.process(FAKE_USER.id, 't', photo.id);
+    await suggester.prepareSubjects(FAKE_USER.id, 't');
     const item = suggester.greeting(FAKE_USER.id).suggestions.find(s => s.assetId === photo.id);
     const tweaked = { ...item.recipe, adjust: { ...item.recipe.adjust, pop: Math.min(1, item.recipe.adjust.pop + 0.3) } };
     suggester.accepted(FAKE_USER.id, item.id, tweaked);

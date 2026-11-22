@@ -195,16 +195,20 @@ describe('apply and replace original', () => {
 describe('apply and trash the rest of the subject', () => {
     test('the original stays under the edit, the other photos (and their stacks) go to the trash', async () => {
         const images = library[0].assets.filter(a => a.isImage);
-        const [kept, similar, twin] = images.slice(4, 7);
+        const [kept, similar, twin, rawTwin] = images.slice(4, 8);
         stack.fake.tokens.add('t');
+        // The kept photo comes with a RAW twin in its stack
+        await fetch(`${stack.fake.url}/api/stacks`, { method: 'POST', headers: { authorization: 'Bearer t', 'content-type': 'application/json' }, body: JSON.stringify({ assetIds: [kept.id, rawTwin.id] }) });
         await stack.editor.save('t', twin.id, RECIPE, 'manual', () => {}); // a stack the trash must not split
         const twinStack = stack.fake.stackOf(twin.id);
-        const result = await stack.editor.save('t', kept.id, RECIPE, 'suggestion', () => {}, null, { trash: [similar.id, twin.id, kept.id] });
+        const result = await stack.editor.save('t', kept.id, RECIPE, 'suggestion', () => {}, null, { trash: [similar.id, twin.id, kept.id, rawTwin.id] });
         assert.equal(stack.fake.assets.get(kept.id).isTrashed ?? false, false, 'original stays');
         assert.equal(stack.fake.stackOf(kept.id).primaryAssetId, result.renderedAssetId, 'edit on top');
+        assert.deepEqual(new Set(stack.fake.stackOf(kept.id).assetIds), new Set([kept.id, result.renderedAssetId]), 'a stack of the original and the edit');
+        assert.equal(stack.fake.assets.get(rawTwin.id).isTrashed, true, 'RAW twin trashed');
         assert.equal(stack.fake.assets.get(result.renderedAssetId).isTrashed ?? false, false);
         assert.equal(stack.fake.assets.get(similar.id).isTrashed, true);
         for (const id of twinStack.assetIds) assert.equal(stack.fake.assets.get(id).isTrashed, true, 'whole stack of a trashed photo');
-        assert.deepEqual(new Set(result.trashed), new Set([similar.id, ...twinStack.assetIds]));
+        assert.deepEqual(new Set(result.trashed), new Set([similar.id, rawTwin.id, ...twinStack.assetIds]));
     });
 });

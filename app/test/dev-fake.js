@@ -48,7 +48,7 @@ async function fakeSuggester(library) {
         setStatus: (id, status) => { if (rows.has(id)) rows.get(id).status = status; },
         accepted: (userId, id) => { if (rows.has(id)) rows.get(id).status = 'applied'; },
         // Pretend the next few photos of the library show the same subject
-        shownSubject: (userId, id) => rows.get(id)?.subject ?? [],
+        storedSubject: (userId, id) => rows.get(id)?.subject ?? [],
         subject: async (userId, token, id) => rows.has(id) ? (rows.get(id).subject = library[0].assets.filter(a => a.isImage).slice(3 + Number(id.slice(1)) * 3, 6 + Number(id.slice(1)) * 3).map(a => a.id)) : [],
         retire: () => {},
         dismiss: (userId, id) => (rows.has(id) ? (rows.get(id).status = 'dismissed') : false),

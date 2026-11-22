@@ -89,16 +89,21 @@ export function createEditor({ immich, renderPool, maskStore = null, log = conso
         };
     }
 
-    // Moves `ids` (and the rest of their stacks, e.g. a RAW twin) to Immich's trash, never
-    // touching anything in `keep`; returns what was trashed
-    async function trashOthers(token, ids, keep) {
+    // Moves `ids` (and the rest of their stacks) to Immich's trash. Members of the original's
+    // own stack (a RAW twin) leave it first, so it ends up as original + edit; `keep` is never
+    // touched. Returns what was trashed.
+    async function trashOthers(token, ids, { keep, ownStackId }) {
         const targets = new Set();
         for (const id of ids) {
-            if (keep.has(id)) continue;
+            if (keep.has(id) || targets.has(id)) continue;
             const asset = await immich.asset(token, id).catch(() => null);
             if (!asset || asset.isTrashed) continue;
             targets.add(id);
             if (!asset.stack?.id) continue;
+            if (asset.stack.id === ownStackId) {
+                await immich.removeFromStack(token, ownStackId, id);
+                continue;
+            }
             const stack = await immich.stack(token, asset.stack.id).catch(() => null);
             for (const member of stack?.assets ?? []) if (!keep.has(member.id)) targets.add(member.id);
         }
@@ -174,12 +179,11 @@ export function createEditor({ immich, renderPool, maskStore = null, log = conso
         onEvent({ type: source === 'suggestion' ? 'suggestion-saved' : 'manual-edit', userId, originalId, editId, recipe });
         let trashed = [];
         if (trash.length) {
-            // Other photos of the same subject: the original's stack (with the new edit) stays
+            // The rest of the subject: only the original and the new edit (and earlier edits) stay
             report(`Moving ${trash.length} similar photo${trash.length === 1 ? '' : 's'} to the trash`);
             const stacked = await immich.asset(token, originalId);
-            const stack = stacked.stack?.id ? await immich.stack(token, stacked.stack.id).catch(() => null) : null;
-            const keep = new Set([originalId, renderedAssetId, ...(stack?.assets ?? []).map(a => a.id)]);
-            trashed = await trashOthers(token, trash, keep);
+            const keep = new Set([originalId, renderedAssetId, ...edits.map(e => e.renderedAssetId)]);
+            trashed = await trashOthers(token, trash, { keep, ownStackId: stacked.stack?.id ?? null });
         }
         return { editId, renderedAssetId, width: rendered.width, height: rendered.height, from, trashed };
     }
