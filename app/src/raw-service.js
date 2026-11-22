@@ -9,7 +9,7 @@ import { pairKey, matchPair } from './raw-pairs.js';
 import { Worker } from 'node:worker_threads';
 import { MAX_DELTA_E, applyBaseline } from './raw.js';
 
-const INFO_VERSION = 2; // bump when development or fitting changes: cached matches are refitted
+const INFO_VERSION = 3; // bump when development or fitting changes: cached matches are refitted
 export const RAW_KEY = 'editor-photos-raw';
 // The RAW is only used when its crop has (almost) the JPEG's resolution: zoom shots store a
 // small crop that the camera upscales with multi-frame detail the RAW lacks
@@ -79,10 +79,10 @@ export function createRawService({ immich, dataDir, log = console }) {
         return match ? { jpeg, raw: match.raw } : null;
     }
 
-    // Downloaded DNGs (~15 MB each) are kept for a week; fits and previews stay
+    // Downloaded DNGs (~15 MB) and camera JPEGs are kept for a week; fits and previews stay
     function pruneDngs() {
         for (const name of readdirSync(dir)) {
-            if (!name.endsWith('.dng')) continue;
+            if (!name.endsWith('.dng') && !/^[\w-]+\.jpg$/.test(name)) continue;
             try {
                 if (Date.now() - statSync(path.join(dir, name)).mtimeMs > 7 * 24 * 3600e3) rmSync(path.join(dir, name), { force: true });
             } catch {
@@ -114,7 +114,13 @@ export function createRawService({ immich, dataDir, log = console }) {
         if (!pair) return { available: false, reason: 'no-raw' };
         const dng = await dngFile(auth, pair.raw.id);
         const jpeg = await jpegPreview(auth, jpegId);
-        const fitted = await runInWorker('fit', { dng, jpeg: { data: jpeg.data.buffer.slice(jpeg.data.byteOffset, jpeg.data.byteOffset + jpeg.data.byteLength), width: jpeg.width, height: jpeg.height }, previewFile: file(jpegId, 'preview.f32') });
+        // The full-size camera JPEG, for fitting the sharpening to its detail
+        const jpegFile = file(jpegId, 'jpg');
+        if (!existsSync(jpegFile)) {
+            const response = await immich.original(auth, jpegId);
+            writeFileSync(jpegFile, Buffer.from(await response.arrayBuffer()));
+        }
+        const fitted = await runInWorker('fit', { dng, jpeg: { data: jpeg.data.buffer.slice(jpeg.data.byteOffset, jpeg.data.byteOffset + jpeg.data.byteLength), width: jpeg.width, height: jpeg.height }, jpegFile, previewFile: file(jpegId, 'preview.f32') });
         const { baseline } = fitted;
         const ok = baseline.quality.median <= MAX_DELTA_E && baseline.alignment.confidence >= 0.2;
         const a = baseline.alignment;

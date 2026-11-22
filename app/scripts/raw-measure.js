@@ -49,6 +49,31 @@ for (const dng of readdirSync(dir).filter(f => f.endsWith('.dng') && f.includes(
         await sharp(canvas, { raw: { width: W * 3, height: dev.height, channels: 3 } }).jpeg({ quality: 85 }).toFile(path.join(process.env.DUMP, `${base}.png.jpg`));
     }
     results.push(b.quality.median);
+    if (process.env.FULL) {
+        // Full resolution, central 1024²: detail per scale and noise vs the camera JPEG, before
+        // and after the fitted sharpening
+        const crop = raw.cropForBaseline(prepared, b.alignment);
+        const jm = await sharp(path.join(dir, jpg)).metadata();
+        const portrait = crop.height > crop.width;
+        const jw = portrait ? Math.min(jm.width, jm.height) : Math.max(jm.width, jm.height);
+        const f = crop.width / jw, S = 1024;
+        const region = (img, scale) => {
+            const out = new Float32Array(S * S * 3);
+            const ox = img.width / 2 - (S / 2) * scale, oy = img.height / 2 - (S / 2) * scale;
+            for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+                const sx = Math.min(img.width - 1, Math.round(ox + x * scale)), sy = Math.min(img.height - 1, Math.round(oy + y * scale));
+                for (let c = 0; c < 3; c++) out[(y * S + x) * 3 + c] = img.data[(sy * img.width + sx) * 3 + c];
+            }
+            return { width: S, height: S, data: out };
+        };
+        const ours = raw.applyBaseline(region(crop, f), b);
+        const { data: jd, info: ji } = await sharp(path.join(dir, jpg)).autoOrient().removeAlpha().raw().toBuffer({ resolveWithObject: true });
+        const cam = region({ width: ji.width, height: ji.height, data: Float32Array.from(jd, v => v / 255) }, 1);
+        const before = raw.fitSharpen(ours, cam, { coring: Number(process.env.CORING ?? 2) });
+        raw.sharpen(ours, before.gains, before.cores);
+        const after = raw.fitSharpen(ours, cam);
+        console.log(`   cores ${before.cores.join("/")} full-res detail ours/jpeg ${before.detail.join('/')} noise ${before.noise} → gains ${before.gains.join('/')} → detail ${after.detail.join('/')} noise ${after.noise}`);
+    }
     console.log(`${base.slice(4).padEnd(28)} dev ${prepared.width}x${prepared.height} jpeg ${info.width}x${info.height}  median ${String(b.quality.median).padStart(6)}  p95 ${String(b.quality.p95).padStart(6)}  align ${b.alignment.confidence}  ${((Date.now() - t0) / 1000).toFixed(1)}s`);
 }
 results.sort((a, b) => a - b);

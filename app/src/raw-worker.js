@@ -3,7 +3,7 @@
 import { writeFileSync } from 'node:fs';
 import { parentPort } from 'node:worker_threads';
 import { resize } from '../public/edit/pipeline.js';
-import { applyBaseline, buildBaseline, cropForBaseline, prepareSource } from './raw.js';
+import { applyBaseline, buildBaseline, cropForBaseline, fitDetail, prepareSource, sharpen } from './raw.js';
 
 const PREVIEW_PIXELS = 1.6e6;
 const log = { info: message => parentPort.postMessage({ log: message }), warn: message => parentPort.postMessage({ log: message }) };
@@ -46,10 +46,17 @@ function fitEdges(img, w, h) {
 const ops = {
     // Fits the baseline against the camera JPEG's preview pixels; writes the aligned linear
     // preview (Float32) for the editor's RAW endpoint
-    async fit({ dng, jpeg, previewFile }) {
+    async fit({ dng, jpeg, jpegFile, previewFile }) {
         const dev = await prepareSource(dng);
         const baseline = await buildBaseline(dev, new Uint8Array(jpeg.data), jpeg.width, jpeg.height, log);
         const crop = cropForBaseline(dev, baseline.alignment);
+        // The camera's detail: sharpening fitted at full resolution (kept with the baseline,
+        // so it still applies once the JPEG is gone)
+        if (jpegFile) {
+            const { gains, cores, detail, noise } = await fitDetail(crop, baseline, jpegFile);
+            baseline.sharpen = { gains, cores };
+            log.info(`RAW detail: ours/camera ${detail.join('/')}, noise ${noise}, sharpening ${gains.join('/')}`);
+        }
         const scale = Math.min(1, Math.sqrt(PREVIEW_PIXELS / (crop.width * crop.height)));
         const small = resize(crop, Math.round(crop.width * scale), Math.round(crop.height * scale));
         writeFileSync(previewFile, Buffer.from(small.data.buffer));
@@ -67,6 +74,7 @@ const ops = {
             const close = Math.abs(size.width / look.width - 1) < 0.01 && Math.abs(size.height / look.height - 1) < 0.01;
             look = close ? fitEdges(look, size.width, size.height) : resample(look, size.width, size.height);
         }
+        if (baseline.sharpen) sharpen(look, baseline.sharpen.gains, baseline.sharpen.cores);
         const px = new Uint16Array(look.data.length);
         for (let i = 0; i < px.length; i++) px[i] = Math.round(Math.min(1, Math.max(0, look.data[i])) * 65535);
         return { result: { width: look.width, height: look.height, depth: 16, buffer: px.buffer }, transfer: [px.buffer] };

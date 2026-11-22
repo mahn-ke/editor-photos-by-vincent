@@ -25,13 +25,18 @@ export const MAX_DELTA_E = 6;
 // ---- Reading the DNG -------------------------------------------------------------
 
 export async function readTags(file) {
-    const { stdout } = await run(EXIFTOOL, ['-j', '-n', '-b', '-OpcodeList2', '-OpcodeList3', '-ProfileGainTableMap', '-DefaultCropOrigin', '-DefaultCropSize', '-BaselineExposure', '-ImageWidth', '-ImageHeight', '-Model', '-Orientation', file], { maxBuffer: 64 * 1024 * 1024 });
+    const { stdout } = await run(EXIFTOOL, ['-j', '-n', '-b', '-OpcodeList2', '-OpcodeList3', '-ProfileGainTableMap', '-NoiseProfile',
+        '-ColorMatrix1', '-ColorMatrix2', '-CameraCalibration1', '-CameraCalibration2', '-ForwardMatrix1', '-ForwardMatrix2',
+        '-CalibrationIlluminant1', '-CalibrationIlluminant2', '-AsShotWhiteXY', '-AsShotNeutral', '-AnalogBalance', '-DefaultCropOrigin', '-DefaultCropSize', '-BaselineExposure', '-ImageWidth', '-ImageHeight', '-Model', '-Orientation', file], { maxBuffer: 64 * 1024 * 1024 });
     return JSON.parse(stdout)[0] ?? {};
 }
 
-export async function develop(file) {
-    // -4: 16-bit linear, no auto-brightening; -o 1: sRGB primaries; -w: camera WB; -q 3: AHD
-    const { stdout } = await run(DCRAW, ['-T', '-4', '-o', '1', '-w', '-q', '3', '-t', '0', '-Z', '-', file], { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024 });
+// -4: 16-bit linear, no auto-brightening; -q 3: AHD. `camera`: raw camera channels with unit
+// white balance (-o 0 -r 1 1 1 1), so the DNG's NoiseProfile describes the noise exactly;
+// otherwise sRGB primaries with camera white balance
+export async function develop(file, { camera = false } = {}) {
+    const colour = camera ? ['-o', '0', '-r', '1', '1', '1', '1'] : ['-o', '1', '-w'];
+    const { stdout } = await run(DCRAW, ['-T', '-4', ...colour, '-q', '3', '-t', '0', '-Z', '-', file], { encoding: 'buffer', maxBuffer: 1024 * 1024 * 1024 });
     // rgb16 keeps all 16 bits; without it sharp reduces the TIFF to 8 bits per channel
     const { data, info } = await sharp(stdout).toColourspace('rgb16').raw({ depth: 'ushort' }).toBuffer({ resolveWithObject: true });
     const px = new Uint16Array(data.buffer, data.byteOffset, data.byteLength / 2);
@@ -245,10 +250,24 @@ export function orient(img, orientation) {
     return { width: ow, height: oh, data: out };
 }
 
-// Developed, lens-shading corrected and upright linear RGB, ready to align with the JPEG
-export async function prepareSource(file) {
-    const [tags, dev] = await Promise.all([readTags(file), develop(file)]);
-    const shaded = applyGainMaps(dev, parseGainMaps(tags.OpcodeList2));
+// Wavelet thresholds in noise σ (luma, chroma); RAW_DENOISE="luma,chroma" overrides, "0" turns it off
+const DENOISE = (() => {
+    const v = process.env.RAW_DENOISE;
+    if (v === '0') return null;
+    const [luma, chroma] = v ? v.split(',').map(Number) : [];
+    // Measured on eight Pixel pairs: noise at or below the camera JPEG's, detail ≈ 0.8–1.1×
+    return { luma: Number.isFinite(luma) ? luma : 2.5, chroma: Number.isFinite(chroma) ? chroma : 4 };
+})();
+
+// Developed, denoised, lens-shading corrected and upright linear sRGB, ready to align
+export async function prepareSource(file, { noise = DENOISE } = {}) {
+    const tags = await readTags(file);
+    const toSrgb = cameraToSrgb(tags);
+    const dev = await develop(file, { camera: Boolean(toSrgb) });
+    // Raw camera channels: denoise with the exact noise model, then lens shading per channel,
+    // then white balance and colour
+    if (toSrgb && noise) denoise(dev, parseNoiseProfile(tags.NoiseProfile), noise);
+    const shaded = applyMatrix(applyGainMaps(dev, parseGainMaps(tags.OpcodeList2)), toSrgb);
     const warped = applyWarp(shaded, parseWarp(tags.OpcodeList3));
     // The table is indexed by the pixel before baseline exposure (measured: lower error than after)
     const toned = applyGainTable(warped, parseGainTable(tags.ProfileGainTableMap));
@@ -266,6 +285,190 @@ export function cropForBaseline(dev, a) {
     const out = { width: w, height: h, data: new Float32Array(w * h * 3) };
     for (let y = 0; y < h; y++) out.data.set(dev.data.subarray(((y0 + y) * dev.width + x0) * 3, ((y0 + y) * dev.width + x0 + w) * 3), y * w * 3);
     return out;
+}
+
+// ---- Colour (DNG spec: camera neutral and ForwardMatrix) -----------------------------
+
+const nums = v => String(v ?? '').trim().split(/\s+/).map(Number).filter(Number.isFinite);
+const mat3 = v => { const a = nums(v); return a.length === 9 ? [a.slice(0, 3), a.slice(3, 6), a.slice(6, 9)] : null; };
+const mul3 = (a, b) => a.map(r => [0, 1, 2].map(j => r[0] * b[0][j] + r[1] * b[1][j] + r[2] * b[2][j]));
+const mulv = (a, v) => a.map(r => r[0] * v[0] + r[1] * v[1] + r[2] * v[2]);
+const mix3 = (a, b, w) => a.map((r, i) => r.map((v, j) => v * w + b[i][j] * (1 - w)));
+// EXIF LightSource codes → colour temperature (K)
+const ILLUMINANT_K = { 1: 5500, 2: 4200, 3: 2850, 4: 5500, 10: 6500, 11: 7500, 12: 6400, 13: 5000, 14: 4200, 15: 3450, 17: 2856, 18: 4874, 19: 6774, 20: 5503, 21: 6504, 22: 7504, 23: 5003, 24: 3200 };
+// XYZ (D50) → linear sRGB (D65), Bradford-adapted
+const XYZ50_TO_SRGB = [[3.1338561, -1.6168667, -0.4906146], [-0.9787684, 1.9161415, 0.0334540], [0.0719453, -0.2289914, 1.4052427]];
+
+// Camera RGB (unit white balance) → linear sRGB: white balance from AsShotWhiteXY (or
+// AsShotNeutral), ColorMatrix/ForwardMatrix interpolated by colour temperature
+export function cameraToSrgb(tags) {
+    const identity = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    const cc1 = mat3(tags.CameraCalibration1) ?? identity;
+    const cc2 = mat3(tags.CameraCalibration2) ?? cc1;
+    const cm1 = mat3(tags.ColorMatrix1), cm2 = mat3(tags.ColorMatrix2) ?? cm1;
+    const fm1 = mat3(tags.ForwardMatrix1), fm2 = mat3(tags.ForwardMatrix2) ?? fm1;
+    if (!cm1 || !fm1) return null;
+    const t1 = ILLUMINANT_K[Number(tags.CalibrationIlluminant1)] ?? 2856;
+    const t2 = ILLUMINANT_K[Number(tags.CalibrationIlluminant2)] ?? 6504;
+    const weight = cct => Math.min(1, Math.max(0, (1 / cct - 1 / t2) / (1 / t1 - 1 / t2)));
+    let neutral = nums(tags.AsShotNeutral);
+    let w = 0.5;
+    if (neutral.length !== 3) {
+        const [x, y] = nums(tags.AsShotWhiteXY);
+        const xyz = x && y ? [x / y, 1, (1 - x - y) / y] : [0.9642, 1, 0.8249];
+        const n = (x - 0.332) / (0.1858 - y); // McCamy
+        w = weight(x && y ? 449 * n ** 3 + 3525 * n ** 2 + 6823.3 * n + 5520.33 : 5000);
+        neutral = mulv(mix3(mul3(cc1, cm1), mul3(cc2, cm2), w), xyz);
+    }
+    const fm = mix3(fm1, fm2, w);
+    const g = neutral[1];
+    const balance = [[g / neutral[0], 0, 0], [0, 1, 0], [0, 0, g / neutral[2]]];
+    return mul3(XYZ50_TO_SRGB, mul3(fm, balance));
+}
+
+export function applyMatrix(img, m) {
+    if (!m) return img;
+    const d = img.data;
+    for (let j = 0; j < d.length; j += 3) {
+        const r = d[j], g = d[j + 1], b = d[j + 2];
+        d[j] = m[0][0] * r + m[0][1] * g + m[0][2] * b;
+        d[j + 1] = m[1][0] * r + m[1][1] * g + m[1][2] * b;
+        d[j + 2] = m[2][0] * r + m[2][1] * g + m[2][2] * b;
+    }
+    return img;
+}
+
+// ---- Noise reduction -----------------------------------------------------------------
+// The DNG NoiseProfile gives, per colour plane, variance = S·x + O (x: 0..1 raw). The generalised
+// Anscombe transform makes the noise unit-variance everywhere; an orthonormal luma/chroma split
+// follows (chroma is denoised harder, as in HDR+'s published finishing pipeline), then each
+// plane is decomposed with an à-trous B3-spline wavelet whose detail coefficients are
+// soft-thresholded at k·σ of that scale. In place, on raw camera RGB (before lens shading).
+
+const B3_SIGMA = [0.8908, 0.2007, 0.0856, 0.0413, 0.0205, 0.0103];
+
+function mirror(i, n) {
+    if (i < 0) i = -i;
+    if (i >= n) i = 2 * n - 2 - i;
+    return Math.min(n - 1, Math.max(0, i));
+}
+
+function atrousPass(src, dst, w, h, step, horizontal) {
+    const k0 = 0.375, k1 = 0.25, k2 = 0.0625;
+    if (horizontal) {
+        for (let y = 0; y < h; y++) {
+            const row = y * w;
+            for (let x = 0; x < w; x++) {
+                const inner = x >= 2 * step && x < w - 2 * step;
+                const a = inner ? x - 2 * step : mirror(x - 2 * step, w), b = inner ? x - step : mirror(x - step, w);
+                const c = inner ? x + step : mirror(x + step, w), d = inner ? x + 2 * step : mirror(x + 2 * step, w);
+                dst[row + x] = k0 * src[row + x] + k1 * (src[row + b] + src[row + c]) + k2 * (src[row + a] + src[row + d]);
+            }
+        }
+    } else {
+        for (let y = 0; y < h; y++) {
+            const a = mirror(y - 2 * step, h) * w, b = mirror(y - step, h) * w, c = mirror(y + step, h) * w, d = mirror(y + 2 * step, h) * w;
+            const row = y * w;
+            for (let x = 0; x < w; x++) {
+                dst[row + x] = k0 * src[row + x] + k1 * (src[b + x] + src[c + x]) + k2 * (src[a + x] + src[d + x]);
+            }
+        }
+    }
+}
+
+// Soft-thresholds the wavelet detail of `plane` in place; thresholds[k] for scale k (2^k px)
+export function waveletShrink(plane, w, h, thresholds) {
+    let current = Float32Array.from(plane);
+    let next = new Float32Array(plane.length);
+    const tmp = new Float32Array(plane.length);
+    plane.fill(0);
+    for (let k = 0; k < thresholds.length; k++) {
+        atrousPass(current, tmp, w, h, 1 << k, true);
+        atrousPass(tmp, next, w, h, 1 << k, false);
+        const t = thresholds[k];
+        for (let i = 0; i < plane.length; i++) {
+            const d = current[i] - next[i];
+            plane[i] += d > t ? d - t : d < -t ? d + t : 0;
+        }
+        [current, next] = [next, current];
+    }
+    for (let i = 0; i < plane.length; i++) plane[i] += current[i];
+    return plane;
+}
+
+export function parseNoiseProfile(value) {
+    const a = nums(value);
+    if (a.length >= 6) return [[a[0], a[1]], [a[2], a[3]], [a[4], a[5]]];
+    if (a.length >= 2) return [[a[0], a[1]], [a[0], a[1]], [a[0], a[1]]];
+    return null;
+}
+
+const INV_SQRT3 = 1 / Math.sqrt(3), INV_SQRT2 = 1 / Math.SQRT2, INV_SQRT6 = 1 / Math.sqrt(6);
+
+export function denoise(img, profile, { luma = 1, chroma = 3, scales = 5 } = {}) {
+    if (!profile) return img;
+    const { width: w, height: h, data } = img;
+    const n = w * h;
+    const planes = [new Float32Array(n), new Float32Array(n), new Float32Array(n)];
+    const [[S0, O0], [S1, O1], [S2, O2]] = profile;
+    const gat = (x, S, O) => (2 / S) * Math.sqrt(Math.max(0, S * x + 0.375 * S * S + O));
+    for (let p = 0, j = 0; p < n; p++, j += 3) {
+        const r = gat(data[j], S0, O0), g = gat(data[j + 1], S1, O1), b = gat(data[j + 2], S2, O2);
+        planes[0][p] = (r + g + b) * INV_SQRT3;
+        planes[1][p] = (r - b) * INV_SQRT2;
+        planes[2][p] = (r - 2 * g + b) * INV_SQRT6;
+    }
+    if (luma > 0) waveletShrink(planes[0], w, h, B3_SIGMA.slice(0, scales).map(s => s * luma));
+    if (chroma > 0) {
+        waveletShrink(planes[1], w, h, B3_SIGMA.slice(0, scales).map(s => s * chroma));
+        waveletShrink(planes[2], w, h, B3_SIGMA.slice(0, scales).map(s => s * chroma));
+    }
+    const inv = (v, S, O) => { const half = v * S / 2; return Math.max(0, (half * half - 0.375 * S * S - O) / S); };
+    for (let p = 0, j = 0; p < n; p++, j += 3) {
+        const y = planes[0][p] * INV_SQRT3, c1 = planes[1][p] * INV_SQRT2, c2 = planes[2][p] * INV_SQRT6;
+        data[j] = inv(y + c1 + c2, S0, O0);
+        data[j + 1] = inv(y - 2 * c2, S1, O1);
+        data[j + 2] = inv(y - c1 + c2, S2, O2);
+    }
+    return img;
+}
+
+// ---- Sharpening ----------------------------------------------------------------------
+// Adds gains[k] × the luma detail of à-trous scale k (1, 2, 4 px) to every channel of the
+// display-referred image; the gains are fitted per photo to the camera JPEG's detail
+
+export function lumaBands(img, count) {
+    const { width: w, height: h, data } = img;
+    const n = w * h;
+    let current = new Float32Array(n);
+    for (let p = 0, j = 0; p < n; p++, j += 3) current[p] = 0.2126 * data[j] + 0.7152 * data[j + 1] + 0.0722 * data[j + 2];
+    const tmp = new Float32Array(n);
+    const bands = [];
+    for (let k = 0; k < count; k++) {
+        const next = new Float32Array(n);
+        atrousPass(current, tmp, w, h, 1 << k, true);
+        atrousPass(tmp, next, w, h, 1 << k, false);
+        for (let i = 0; i < n; i++) current[i] -= next[i];
+        bands.push(current);
+        current = next;
+    }
+    return bands;
+}
+
+// Coring: only detail above `cores[k]` (the remaining noise of that scale) is amplified
+const core = (v, t) => (v > t ? v - t : v < -t ? v + t : 0);
+
+export function sharpen(img, gains, cores = []) {
+    if (!gains?.some(g => Math.abs(g) > 0.01)) return img;
+    const bands = lumaBands(img, gains.length);
+    const d = img.data;
+    const n = d.length / 3;
+    for (let p = 0, j = 0; p < n; p++, j += 3) {
+        let add = 0;
+        for (let k = 0; k < gains.length; k++) add += gains[k] * core(bands[k][p], cores[k] ?? 0);
+        d[j] += add; d[j + 1] += add; d[j + 2] += add;
+    }
+    return img;
 }
 
 // ---- Alignment ----------------------------------------------------------------------
@@ -706,4 +909,95 @@ export async function buildBaseline(source, jpegPixels, jpegWidth, jpegHeight, l
     baseline.alignment = { scale: best.scale / baseScale, dx: best.offX * best.scale / dev.width, dy: best.offY * best.scale / dev.height, confidence: Math.round(best.confidence * 100) / 100 };
     log.info?.(`RAW baseline: median error ${baseline.quality.median}, p95 ${baseline.quality.p95}, alignment ${JSON.stringify(baseline.alignment)}`);
     return baseline;
+}
+
+// ---- Matching the camera's detail ------------------------------------------------------
+// Compares luma detail of our render and the camera JPEG (same framing and size, display-
+// referred, e.g. a central 1024² region at full resolution) in 16×16 blocks. Blocks where the
+// JPEG has the most detail at scale k fit that scale's gain (energy ratio); the flattest
+// blocks show the remaining noise. Returns { gains, detail: [ours/jpeg per scale], noise }.
+const SHARPEN_SCALES = 5;
+
+function fitSharpenOnce(ours, jpeg, coring, fixedCores) {
+    const { width: w, height: h } = ours;
+    const bo = lumaBands(ours, SHARPEN_SCALES), bj = lumaBands(jpeg, SHARPEN_SCALES);
+    const B = 16, bw = Math.floor(w / B), bh = Math.floor(h / B);
+    const blocks = [];
+    for (let by = 0; by < bh; by++) for (let bx = 0; bx < bw; bx++) blocks.push({ bx, by });
+    const energy = (band, { bx, by }, f = v => v) => {
+        let e = 0;
+        for (let y = by * B; y < by * B + B; y++) for (let x = bx * B; x < bx * B + B; x++) e += f(band[y * w + x]) ** 2;
+        return e / (B * B);
+    };
+    // Flattest blocks (by the JPEG's coarse detail): what we have there is noise
+    const coarse = blocks.map(b => energy(bj[SHARPEN_SCALES - 1], b));
+    const flat = blocks.map((b, i) => [b, coarse[i]]).sort((a, b) => a[1] - b[1]).slice(0, Math.max(1, Math.floor(blocks.length * 0.15))).map(([b]) => b);
+    const rms = (band, set, f) => Math.sqrt(set.reduce((sum, b) => sum + energy(band, b, f), 0) / set.length);
+    const gains = [], cores = [], detail = [];
+    for (let k = 0; k < SHARPEN_SCALES; k++) {
+        const t = fixedCores ? fixedCores[k] : coring * rms(bo[k], flat);
+        cores.push(t);
+        const top = blocks.map(b => [b, energy(bj[k], b)]).sort((a, b) => b[1] - a[1]).slice(0, Math.max(1, Math.floor(blocks.length * 0.3))).map(([b]) => b);
+        const target = rms(bj[k], top);
+        detail.push(Math.round((rms(bo[k], top) / Math.max(1e-9, target)) * 100) / 100);
+        // Gain that brings the cored detail of the most detailed blocks to the JPEG's level
+        let lo = -0.5, hi = 5;
+        for (let iter = 0; iter < 30; iter++) {
+            const g = (lo + hi) / 2;
+            if (rms(bo[k], top, v => v + g * core(v, t)) < target) lo = g; else hi = g;
+        }
+        gains.push((lo + hi) / 2);
+    }
+    const noise = rms(bo[0], flat) / Math.max(1e-9, rms(bj[0], flat));
+    return { gains, cores, detail, noise: Math.round(noise * 100) / 100 };
+}
+
+// Boosting a band and splitting the result again does not return the same band (the scales
+// overlap), so the gains are refined by applying them and measuring again
+export function fitSharpen(ours, jpeg, { coring = 3, iterations = 3 } = {}) {
+    const first = fitSharpenOnce(ours, jpeg, coring);
+    const cores = first.cores;
+    let gains = first.gains;
+    for (let i = 1; i < iterations; i++) {
+        const trial = { width: ours.width, height: ours.height, data: Float32Array.from(ours.data) };
+        sharpen(trial, gains, cores);
+        const next = fitSharpenOnce(trial, jpeg, coring, cores.map(() => 0));
+        gains = gains.map((g, k) => Math.min(6, Math.max(-0.6, (1 + g) * (1 + next.gains[k]) - 1)));
+    }
+    return {
+        gains: gains.map(g => Math.round(g * 100) / 100),
+        cores: cores.map(t => Math.round(t * 1e5) / 1e5),
+        detail: first.detail,
+        noise: first.noise,
+    };
+}
+
+// A size×size region from the centre of `img`, sampled every `scale` pixels (nearest)
+export function centreRegion(img, scale, size) {
+    const out = new Float32Array(size * size * 3);
+    const ox = img.width / 2 - (size / 2) * scale, oy = img.height / 2 - (size / 2) * scale;
+    for (let y = 0; y < size; y++) {
+        const sy = Math.min(img.height - 1, Math.max(0, Math.round(oy + y * scale)));
+        for (let x = 0; x < size; x++) {
+            const sx = Math.min(img.width - 1, Math.max(0, Math.round(ox + x * scale)));
+            const s = (sy * img.width + sx) * 3, d = (y * size + x) * 3;
+            out[d] = img.data[s]; out[d + 1] = img.data[s + 1]; out[d + 2] = img.data[s + 2];
+        }
+    }
+    return { width: size, height: size, data: out };
+}
+
+// Fits the sharpening of `crop` (developed, cropped to the JPEG's framing) to the camera
+// JPEG at full resolution, on the central region; returns { gains, cores, detail, noise }
+export async function fitDetail(crop, baseline, jpegFile) {
+    const meta = await sharp(jpegFile).metadata();
+    const swap = (meta.orientation ?? 1) >= 5;
+    const jw = swap ? meta.height : meta.width, jh = swap ? meta.width : meta.height;
+    const size = Math.min(1024, jw, jh);
+    const { data } = await sharp(jpegFile).autoOrient()
+        .extract({ left: Math.floor((jw - size) / 2), top: Math.floor((jh - size) / 2), width: size, height: size })
+        .removeAlpha().raw().toBuffer({ resolveWithObject: true });
+    const cam = { width: size, height: size, data: Float32Array.from(data, v => v / 255) };
+    const ours = applyBaseline(centreRegion(crop, crop.width / jw, size), baseline);
+    return fitSharpen(ours, cam);
 }
