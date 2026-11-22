@@ -62,9 +62,24 @@ export function createApp({ config, store, immich, editor = null, background = n
     // Revalidate on every load (cheap 304s), so a deploy never leaves stale editor code behind
     app.use('/static', express.static(PUBLIC_DIR, { maxAge: 0 }));
 
+    // Sessions from before background work existed (or before a fresh data volume) never
+    // went through the sign-in hook: set it up on their first request instead. Users who
+    // turned it off keep their row and stay off. Retried at most every 10 minutes on failure.
+    const enrolling = new Map(); // userId → time of the last attempt
+    function enrollExisting(session) {
+        if (!background || background.knows(session.userId)) return;
+        const last = enrolling.get(session.userId);
+        if (last && Date.now() - last < 10 * 60 * 1000) return;
+        enrolling.set(session.userId, Date.now());
+        background.ensureUser(session.token, session.userId)
+            .then(() => enrolling.delete(session.userId))
+            .catch(error => log.warn(`Background setup for existing session failed: ${error.message}`));
+    }
+
     app.use((req, res, next) => {
         req.cookies = parseCookies(req.headers.cookie);
         req.session = store.getSession(req.cookies[SESSION_COOKIE]);
+        if (req.session) enrollExisting(req.session);
         // HTML and JSON are per user; media sets its own private caching
         if (!req.path.startsWith('/media/')) res.set('Cache-Control', 'private, no-store');
         next();

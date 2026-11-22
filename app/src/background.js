@@ -130,6 +130,9 @@ export function createBackground({ db, immich, config, masterKey, log = console,
         enqueue(userId, 'poll');
     }
 
+    // Whether this user ever had background work set up (a row stays after turning it off)
+    const knows = userId => Boolean(q.user.get(userId));
+
     async function disableUser(token, userId) {
         const row = q.user.get(userId);
         if (!row) return;
@@ -286,7 +289,7 @@ export function createBackground({ db, immich, config, masterKey, log = console,
     }
 
     return {
-        ensureUser, disableUser, verifyWebhook, onWebhook, enqueue, unstackRawPairs, status,
+        ensureUser, knows, disableUser, verifyWebhook, onWebhook, enqueue, unstackRawPairs, status,
         start() {
             for (const row of q.users.all()) enqueue(row.user_id, 'poll');
             schedule(0);
